@@ -150,8 +150,8 @@ function actionButton(label, className, handler) {
 const PAGES = {
   home: { label: "Home", render: homePage },
   deposit: { label: "Deposit", render: depositPage },
+  purchases: { label: "Purchases", render: purchasesPage },
   activity: { label: "Activity", render: activityPage },
-  simulate: { label: "Simulate purchases", render: simulatePage, tool: true },
 };
 
 function currentPage() {
@@ -272,10 +272,10 @@ function renderDashboard(data) {
     h("span", { class: "muted small" }, data.account.email),
     actionButton("Log out", "ghost", logout));
 
-  navBox.replaceChildren(...Object.entries(PAGES).map(([name, { label, tool }]) =>
+  navBox.replaceChildren(...Object.entries(PAGES).map(([name, { label }]) =>
     h("a", {
       href: `#/${name === "home" ? "" : name}`,
-      class: tool ? "nav-link tool" : "nav-link",
+      class: "nav-link",
       "aria-current": name === page ? "page" : null,
     }, label)));
 
@@ -339,14 +339,12 @@ function activityPage({ activity }) {
   ];
 }
 
-function simulatePage({ account, card }) {
+function purchasesPage({ account, card }) {
   return [
     h("section", { class: "panel intro" },
-      h("p", { class: "eyebrow" }, "Reviewer tools"),
-      h("h1", {}, "Simulate purchases"),
+      h("h1", {}, "Purchases"),
       h("p", { class: "muted" },
-        "On a real card, purchases come from a store's card terminal, not from this site. ",
-        "This page plays that terminal: it sends your card number to the purchase API."),
+        "Purchases are sent by card number, the way a store's card terminal sends them."),
       h("p", {}, "Balance ", h("strong", {}, formatCents(account.balance_cents)),
         card ? ` · card ending ${card.card_number.slice(-4)}` : " · no active card")),
     h("div", { class: "grid" }, purchasePanel(card), concurrencyPanel(card)),

@@ -63,6 +63,16 @@ async def reject_cross_site_writes(request: Request, call_next):
     return await call_next(request)
 
 
+@app.middleware("http")
+async def revalidate_static_files(request: Request, call_next):
+    # Without this, browsers reuse a cached app.js for a while after it changes.
+    # no-cache still allows the cache; it just asks the server first (cheap 304 via ETag).
+    response = await call_next(request)
+    if not request.url.path.startswith("/api/"):
+        response.headers.setdefault("Cache-Control", "no-cache")
+    return response
+
+
 @app.post("/api/signup", status_code=201)
 def signup(body: SignupIn, response: Response, conn: Conn):
     password_hash = auth.hash_password(body.password)

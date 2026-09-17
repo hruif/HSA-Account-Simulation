@@ -290,7 +290,7 @@ The same three guards work unchanged on Postgres (with row locks instead of a wh
 - Ledger integrity after each case: `balance_cents == Σ deposits − Σ approved purchases`.
 - Each thread opens its own connection and calls `services.process_purchase` directly. No HTTP in the loop, so the test isolates the database guarantee.
 
-**Proof, visible** — the dashboard has a "Simulate concurrent purchases" panel: pick a count and an amount, click once, and `app.js` fires them all with `Promise.all(fetch…)`. The activity table fills with the approved/declined mix and the final balance.
+**Proof, visible** — the Purchases page has a "Concurrency test" panel: pick a count and an amount, click once, and `app.js` fires them all with `Promise.all(fetch…)`. The activity table fills with the approved/declined mix and the final balance.
 
 ## UI
 
@@ -302,11 +302,11 @@ Logged in, the page is split the way a bank site is. Pages live behind the URL h
 |---|---|---|
 | Home | `#/` | Balance with a Deposit funds link, the debit card, last 5 activity rows |
 | Deposit | `#/deposit` | Current balance and the deposit form |
+| Purchases | `#/purchases` | Single purchase and concurrency test |
 | Activity | `#/activity` | Full table: every deposit and purchase attempt, with decline reasons |
-| Simulate purchases | `#/simulate` | Reviewer tools, set apart in the nav: single purchase and concurrency test |
 
 - **Card details are hidden by default** (`•••• 1483`, expiry and CVV masked). Show details reveals them; changing page hides them again.
-- **Purchases are on a separate "Simulate" page** because on a real card they come from a store's terminal, not from the bank's site. The single-purchase form charges the active card automatically; "Use a different card number" opens a field for testing a replaced card.
+- **Purchases have their own page** because on a real card they come from a store's terminal, not from the bank's site. The single-purchase form charges the active card automatically; "Use a different card number" opens a field for testing a replaced card.
 - **Concurrency test** sends every listed amount as a pharmacy purchase with `Promise.all`, so the requests really overlap, and shows how many were approved and the balance left. Presets: $80 + $50, 10 × $30, 20 × $5.
 
 Every action re-fetches `GET /api/me` and redraws from the response. The cookie is the only thing that says who you are.

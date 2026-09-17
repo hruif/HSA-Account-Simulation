@@ -69,7 +69,6 @@ code, .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size:
 }
 .nav-link:hover { color: var(--text); background: var(--bg); }
 .nav-link[aria-current="page"] { color: var(--text); background: var(--bg); font-weight: 600; }
-.nav-link.tool { margin-left: auto; border: 1px dashed var(--border); }
 .session { display: flex; align-items: center; gap: 0.75rem; min-width: 0; }
 .session .muted { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
@@ -208,6 +207,5 @@ tr.declined td { color: var(--muted); }
   .balance { text-align: left; justify-items: start; }
   .nav { order: 3; flex-basis: 100%; }
   .session { margin-left: auto; }
-  .nav-link.tool { margin-left: 0; }
   .row { grid-template-columns: 1fr; }
 }
