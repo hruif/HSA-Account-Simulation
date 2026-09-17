@@ -49,7 +49,7 @@ Rules of the connections:
 - `services.py` never knows about HTTP or cookies. It takes a connection plus plain values and returns a dict. The concurrency test calls these functions directly from threads.
 - `auth.py` owns password hashing and sessions. Services receive an `account_id`, never a token.
 - `db.py` owns the schema, the connection settings, and a `transaction(conn)` context manager that issues `BEGIN IMMEDIATE` / `COMMIT` / `ROLLBACK`.
-- Each request gets its **own** connection. `sqlite3` connections are not safe to share across threads, FastAPI runs each request in its own thread, and opening a SQLite file takes well under a millisecond.
+- Each request gets its **own** connection, and this is a correctness rule, not a performance one. A SQLite connection holds exactly one transaction state. If two requests shared one, the second `BEGIN IMMEDIATE` would fail outright, and statements sent without a `BEGIN` would quietly join the transaction already open: the first request's `ROLLBACK` would then discard the second's work, and its `COMMIT` would commit the second's half-finished work. Separate connections give each request its own transaction, which is what every rule in [Concurrency handling](#concurrency-handling) depends on. `sqlite3` connections are also not safe to use from two threads at once, and FastAPI runs each request in its own thread.
 
 Connection settings, applied on every open (`db.connect`):
 
@@ -332,6 +332,7 @@ The same three guards work unchanged on Postgres (with row locks instead of a wh
 ## Design tradeoffs
 
 - **SQLite, not Postgres.** Zero setup for the reviewer. The write lock covers the whole database, which limits throughput but is correct for a single-node demo. The same SQL works on Postgres.
+- **A new connection per request, not a pool.** A pool would be safe — it lends each request a connection of its own and takes it back, which is the part that matters; what is never safe is two requests using one connection at the same time, for the transaction-state reason above. The pool is skipped because it buys nothing: `sqlite3.connect` on a local file costs microseconds, next to a `BEGIN IMMEDIATE` that waits for the write lock. A server where opening a connection means a network handshake and authentication, as with Postgres, needs one.
 - **Stored balance column, not computed from the tables.** Needed for the atomic guard; the integrity test keeps it honest.
 - **Separate deposit and purchase tables with a view,** not one wide table or a parent table.
 - **Minimal auth.** No email verification, password reset, login rate limiting, or session rotation.
