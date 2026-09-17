@@ -347,8 +347,6 @@ function purchasePage({ account, card }) {
   return [
     h("section", { class: "panel intro" },
       h("h1", {}, "Make a purchase"),
-      h("p", { class: "muted" },
-        "Purchases are sent by card number, the way a store's card terminal sends them."),
       h("p", {}, "Balance ", h("strong", {}, formatCents(account.balance_cents)),
         card ? ` · card ending ${card.card_number.slice(-4)}` : " · no active card")),
     h("div", { class: "grid" }, purchasePanel(card), concurrencyPanel(card)),
@@ -405,16 +403,15 @@ function purchasePanel(card) {
     class: "link small",
     onclick: () => {
       otherCardField.hidden = !otherCardField.hidden;
-      toggle.textContent = otherCardField.hidden ? "Use a different card number" : "Use my active card";
+      toggle.textContent = otherCardField.hidden ? "Use a different card" : "Use my active card";
       if (!otherCardField.hidden) otherCard.focus();
     },
-  }, "Use a different card number");
+  }, "Use a different card");
 
   return h("section", { class: "panel" },
     h("h2", {}, "Single purchase"),
     h("p", { class: "muted small" },
-      card ? `Charged to your card ending ${card.card_number.slice(-4)}. ` : "You have no active card. ",
-      "To see a replaced card declined, ", toggle, "."),
+      card ? `Card ending ${card.card_number.slice(-4)} · ` : "No active card · ", toggle),
     h("form", {
       class: "stack",
       onsubmit: onSubmit(async (data) => {
@@ -464,7 +461,7 @@ function concurrencyPanel(card) {
       await refresh();
     }),
   },
-    field("Amounts to send at the same moment", h("input", { name: "amounts", value: "80, 50", required: true })),
+    field("Amounts (comma-separated)", h("input", { name: "amounts", value: "80, 50", required: true })),
     h("div", { class: "row wrap" },
       presetButton("$80 + $50", "80, 50"),
       presetButton("10 × $30", Array(10).fill("30").join(", ")),
@@ -478,9 +475,7 @@ function concurrencyPanel(card) {
   return h("section", { class: "panel" },
     h("h2", {}, "Concurrency test"),
     h("p", { class: "muted small" },
-      "The assignment requires that purchases arriving at the same time never overdraw the account. ",
-      "Example: balance $100, purchases of $80 and $50 at once, so only one can be approved. ",
-      "Clicking Submit twice is too slow to overlap, so this sends every amount as a pharmacy purchase in parallel."),
+      "Sends every amount as a pharmacy purchase at the same time."),
     form,
     lastBurst && h("div", { class: "burst" },
       h("p", {}, `Sent ${lastBurst.sent} at once: `,

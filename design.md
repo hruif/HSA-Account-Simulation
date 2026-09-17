@@ -306,7 +306,7 @@ Logged in, the page is split the way a bank site is. Pages live behind the URL h
 | Activity | `#/activity` | Full table: every deposit and purchase attempt, with decline reasons |
 
 - **Card details are hidden by default** (`•••• 1483`, expiry and CVV masked). Show details reveals them; changing page hides them again.
-- **Purchases have their own page** because on a real card they come from a store's terminal, not from the bank's site. The single-purchase form charges the active card automatically; "Use a different card number" opens a field for testing a replaced card.
+- **Purchases have their own page** because on a real card they come from a store's terminal, not from the bank's site. The single-purchase form charges the active card automatically; "Use a different card" opens a field for testing a replaced card.
 - **Concurrency test** sends every listed amount as a pharmacy purchase with `Promise.all`, so the requests really overlap, and shows how many were approved and the balance left. Presets: $80 + $50, 10 × $30, 20 × $5.
 
 Every action re-fetches `GET /api/me` and redraws from the response. The cookie is the only thing that says who you are.
