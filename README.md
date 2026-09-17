@@ -2,7 +2,7 @@
 
 A local web app that simulates a Health Savings Account: sign up, deposit funds, get a virtual debit card, and make purchases that are approved only for qualified medical expenses and only when the balance covers them, including when many purchases arrive at the same time.
 
-Stack: Python (FastAPI + uvicorn), SQLite, plain HTML/CSS/JavaScript. Design: [design.md](design.md).
+Stack: Python (FastAPI + uvicorn), SQLite, plain HTML/CSS/JavaScript. Design and decisions: [architecture.md](architecture.md).
 
 ## Setup
 

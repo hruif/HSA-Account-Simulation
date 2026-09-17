@@ -1,8 +1,12 @@
-# HSA Account Simulation — Design
+# HSA Account Simulation — Architecture
 
-Pre-build design. Once the code exists this becomes the basis of `architecture.md`.
+How the app is built, how a request travels through it, what is stored, how
+simultaneous purchases are kept safe, and what was traded away. Setup and usage
+are in [README.md](README.md).
 
-## Stack
+## System architecture
+
+### Stack
 
 | Layer | Choice | Why |
 |---|---|---|
@@ -17,7 +21,7 @@ Pre-build design. Once the code exists this becomes the basis of `architecture.m
 
 Money is always **integer cents**. `$80.10` is stored and passed as `8010`. No floats anywhere.
 
-## How the parts connect
+### How the parts connect
 
 ```
  Browser                          Python process (uvicorn)                     Disk
@@ -64,7 +68,7 @@ conn.row_factory = sqlite3.Row
 
 **WAL files.** WAL mode uses three files: `hsa.db` (the data), `hsa.db-wal` (new writes are appended here first), and `hsa.db-shm` (a small index into the WAL). Every ~1000 pages SQLite runs a checkpoint: it copies the WAL pages into `hsa.db` and reuses the WAL from the start. The WAL is a crash-safety buffer, not a history. The permanent history is the `deposits` and `purchases` tables. All three files are git-ignored.
 
-## File layout
+### File layout
 
 ```
 main.py                  FastAPI app, routes, static mount, schema + demo seed on startup
@@ -81,6 +85,118 @@ tests/test_concurrency.py
 hsa.db*                  created at first run, git-ignored
 README.md  architecture.md  ai-usage.md
 ```
+
+### Pages
+
+Logged out: one panel with Log in / Sign up tabs, and the demo credentials under it.
+
+Logged in, the page is split the way a bank site is. Pages live behind the URL hash, so Back, Forward, and reload keep your place:
+
+| Page | Hash | Shows |
+|---|---|---|
+| Home | `#/` | Balance with Make a purchase and Deposit funds buttons, the debit card, last 5 activity rows |
+| Deposit | `#/deposit` | Current balance and the deposit form |
+| Make a purchase | `#/purchase` | Single purchase and concurrency test. Not in the nav (a nav item called "Purchases" reads like a history list); reached from the Home button |
+| Activity | `#/activity` | Full table: every deposit and purchase attempt, with decline reasons |
+
+- **Card details are hidden by default** (`•••• 1483`, expiry and CVV masked). Show details reveals them; changing page hides them again.
+- **Purchases have their own page** because on a real card they come from a store's terminal, not from the bank's site. The single-purchase form charges the active card automatically; "Use a different card" opens a field for testing a replaced card.
+- **Concurrency test** sends every listed amount as a pharmacy purchase with `Promise.all`, so the requests really overlap, and shows how many were approved and the balance left. Presets: $80 + $50, 10 × $30, 20 × $5.
+
+Every action re-fetches `GET /api/me` and redraws from the response. The cookie is the only thing that says who you are.
+
+## Request flow
+
+### API
+
+All bodies and responses are JSON. Amounts are `amount_cents` integers.
+
+| Method | Path | Auth | Body | Result |
+|---|---|---|---|---|
+| POST | `/api/signup` | — | `{owner_name, email, password}` | 201, sets cookie; 409 email taken |
+| POST | `/api/login` | — | `{email, password}` | 200, sets cookie; 401 |
+| POST | `/api/logout` | cookie | — | 204, clears cookie |
+| GET | `/api/me` | cookie | — | account + active card + last 50 rows of `account_activity` (approved **and** declined) |
+| POST | `/api/me/deposits` | cookie | `{amount_cents}` | 200 `{balance_cents, deposit}` |
+| POST | `/api/me/card` | cookie | — | 201 new card; replaces the active one if it exists |
+| POST | `/api/purchases` | — | `{card_number, merchant_name, merchant_category, amount_cents}` | 200 `{status, decline_reason, balance_cents, purchase}`; 404 unknown card |
+| GET | `/api/categories` | — | — | `{qualified: [...], not_qualified: [...]}` |
+
+- **`/api/purchases` takes no session.** It plays the role of the card network: a merchant sends the card number, not the cardholder's login. The card number is the credential, as with a real card. The UI pre-fills the logged-in user's card number.
+- **A declined purchase is HTTP 200** with `status: "declined"`. It is a valid business outcome, not an error. 4xx is only for bad input, missing auth, or an unknown card.
+
+### Auth
+
+- **Sign up:** `owner_name`, `email`, `password` (min 8 characters). The password is hashed with `bcrypt` and the account row is inserted. A duplicate email hits the `UNIQUE` constraint → 409. Signing up also logs you in.
+- **Log in:** look up by email, `bcrypt.checkpw`. Wrong email and wrong password return the same 401 message, so the response does not reveal which emails exist.
+- **Session:** `secrets.token_urlsafe(32)` goes to the browser in a cookie (`HttpOnly`, `SameSite=Lax`, 7-day expiry). The database stores only its sha256, so a leaked database cannot be used to log in.
+- **Every `/api/me/*` route** depends on `current_account`: read cookie → hash → look up an unexpired session → `account_id`, else 401. Services only ever see that `account_id`, so one user cannot act on another's account.
+- **Log out** deletes the session row and clears the cookie.
+- **CSRF:** `SameSite=Lax` stops other sites sending the cookie on POST, and a middleware rejects any non-GET request whose `Origin` header names a different host (403).
+- **Demo user:** on startup, if there are no accounts, seed `demo@example.com` / `demo-password` with $100.00 and an active card. The login page shows these credentials.
+
+### The four requirements
+
+#### 1. Create an HSA account
+
+Information the system needs: `owner_name` (shown on the dashboard and the card), `email` + `password` (login), `balance_cents` (starts at 0). Nothing else — no SSN, address, or employer, because nothing in the simulation uses them.
+
+Flow: sign-up form → `POST /api/signup` → `services.signup(conn, owner_name, email, password_hash)` → `INSERT INTO accounts` → `auth.create_session` → cookie set → dashboard loads from `GET /api/me`.
+
+#### 2. Deposit funds
+
+Flow: deposit form → `POST /api/me/deposits {amount_cents}` → `services.deposit(conn, account_id, amount_cents)`.
+
+Inside one `BEGIN IMMEDIATE`:
+
+```sql
+UPDATE accounts SET balance_cents = balance_cents + ? WHERE id = ?;
+INSERT INTO deposits (account_id, amount_cents) VALUES (?, ?);
+```
+
+Both happen or neither. Pydantic rejects `amount_cents <= 0` before the service runs. IRS annual contribution limits are out of scope.
+
+#### 3. Issue or replace a card
+
+Flow: "Issue card" / "Replace card" button → `POST /api/me/card` → `services.issue_card(conn, account_id)`.
+
+Inside one `BEGIN IMMEDIATE`:
+
+```sql
+UPDATE cards SET status = 'replaced' WHERE account_id = ? AND status = 'active';  -- 0 or 1 rows
+INSERT INTO cards (account_id, card_number, expiry_month, expiry_year, cvv) VALUES (…);
+```
+
+- Number: `4` + 14 random digits + Luhn check digit = 16 digits. Passes a checksum, is not a real card.
+- Expiry: 3 years from today. CVV: 3 random digits.
+- The partial unique index guarantees at most one active card, even if two replace requests race.
+- Old cards stay in the table, so old purchases still point to the card that made them. A purchase on a replaced card is declined `card_inactive`.
+- Card details are stored in plain text. This is a simulation; a real issuer never stores the CVV and keeps card numbers in a tokenization vault.
+
+#### 4. Process purchases
+
+Inputs: `card_number`, `merchant_name`, `merchant_category`, `amount_cents`. Category comes from a fixed dropdown.
+
+Qualified: `pharmacy, hospital, doctor, dental, vision, medical_equipment, lab`.
+Not qualified: `restaurant, grocery, electronics, gas, entertainment, retail, other`.
+
+`services.process_purchase(conn, card_number, merchant_name, merchant_category, amount_cents)`, all inside one `BEGIN IMMEDIATE`:
+
+```
+1. SELECT card by card_number
+     none              → 404, nothing stored
+     status=replaced   → declined card_inactive
+2. category not in QUALIFIED
+                       → declined not_qualified   (balance untouched)
+3. UPDATE accounts SET balance_cents = balance_cents - :amt
+     WHERE id = :account_id AND balance_cents >= :amt
+     rowcount == 0     → declined insufficient_funds
+     rowcount == 1     → approved
+4. INSERT INTO purchases (… status, decline_reason …)
+5. COMMIT
+```
+
+Order matters: a restaurant purchase with too little money is declined `not_qualified`, because that rule does not depend on the balance.
 
 ## Data model
 
@@ -164,98 +280,7 @@ Decisions:
 - **`created_at`** exists only where it is shown or used for order: cards, deposits, purchases. It has one-second precision, so concurrent purchases share a time. The view is sorted by `created_at DESC, id DESC`.
 - **Merchant categories are a Python constant,** not a table. The assignment does not ask for editing them.
 
-## Auth
-
-- **Sign up:** `owner_name`, `email`, `password` (min 8 characters). The password is hashed with `bcrypt` and the account row is inserted. A duplicate email hits the `UNIQUE` constraint → 409. Signing up also logs you in.
-- **Log in:** look up by email, `bcrypt.checkpw`. Wrong email and wrong password return the same 401 message, so the response does not reveal which emails exist.
-- **Session:** `secrets.token_urlsafe(32)` goes to the browser in a cookie (`HttpOnly`, `SameSite=Lax`, 7-day expiry). The database stores only its sha256, so a leaked database cannot be used to log in.
-- **Every `/api/me/*` route** depends on `current_account`: read cookie → hash → look up an unexpired session → `account_id`, else 401. Services only ever see that `account_id`, so one user cannot act on another's account.
-- **Log out** deletes the session row and clears the cookie.
-- **CSRF:** `SameSite=Lax` stops other sites sending the cookie on POST, and a middleware rejects any non-GET request whose `Origin` header names a different host (403).
-- **Demo user:** on startup, if there are no accounts, seed `demo@example.com` / `demo-password` with $100.00 and an active card. The login page shows these credentials.
-
-## API
-
-All bodies and responses are JSON. Amounts are `amount_cents` integers.
-
-| Method | Path | Auth | Body | Result |
-|---|---|---|---|---|
-| POST | `/api/signup` | — | `{owner_name, email, password}` | 201, sets cookie; 409 email taken |
-| POST | `/api/login` | — | `{email, password}` | 200, sets cookie; 401 |
-| POST | `/api/logout` | cookie | — | 204, clears cookie |
-| GET | `/api/me` | cookie | — | account + active card + last 50 rows of `account_activity` (approved **and** declined) |
-| POST | `/api/me/deposits` | cookie | `{amount_cents}` | 200 `{balance_cents, deposit}` |
-| POST | `/api/me/card` | cookie | — | 201 new card; replaces the active one if it exists |
-| POST | `/api/purchases` | — | `{card_number, merchant_name, merchant_category, amount_cents}` | 200 `{status, decline_reason, balance_cents, purchase}`; 404 unknown card |
-| GET | `/api/categories` | — | — | `{qualified: [...], not_qualified: [...]}` |
-
-- **`/api/purchases` takes no session.** It plays the role of the card network: a merchant sends the card number, not the cardholder's login. The card number is the credential, as with a real card. The UI pre-fills the logged-in user's card number.
-- **A declined purchase is HTTP 200** with `status: "declined"`. It is a valid business outcome, not an error. 4xx is only for bad input, missing auth, or an unknown card.
-
-## The four requirements
-
-### 1. Create an HSA account
-
-Information the system needs: `owner_name` (shown on the dashboard and the card), `email` + `password` (login), `balance_cents` (starts at 0). Nothing else — no SSN, address, or employer, because nothing in the simulation uses them.
-
-Flow: sign-up form → `POST /api/signup` → `services.signup(conn, owner_name, email, password_hash)` → `INSERT INTO accounts` → `auth.create_session` → cookie set → dashboard loads from `GET /api/me`.
-
-### 2. Deposit funds
-
-Flow: deposit form → `POST /api/me/deposits {amount_cents}` → `services.deposit(conn, account_id, amount_cents)`.
-
-Inside one `BEGIN IMMEDIATE`:
-
-```sql
-UPDATE accounts SET balance_cents = balance_cents + ? WHERE id = ?;
-INSERT INTO deposits (account_id, amount_cents) VALUES (?, ?);
-```
-
-Both happen or neither. Pydantic rejects `amount_cents <= 0` before the service runs. IRS annual contribution limits are out of scope.
-
-### 3. Issue or replace a card
-
-Flow: "Issue card" / "Replace card" button → `POST /api/me/card` → `services.issue_card(conn, account_id)`.
-
-Inside one `BEGIN IMMEDIATE`:
-
-```sql
-UPDATE cards SET status = 'replaced' WHERE account_id = ? AND status = 'active';  -- 0 or 1 rows
-INSERT INTO cards (account_id, card_number, expiry_month, expiry_year, cvv) VALUES (…);
-```
-
-- Number: `4` + 14 random digits + Luhn check digit = 16 digits. Passes a checksum, is not a real card.
-- Expiry: 3 years from today. CVV: 3 random digits.
-- The partial unique index guarantees at most one active card, even if two replace requests race.
-- Old cards stay in the table, so old purchases still point to the card that made them. A purchase on a replaced card is declined `card_inactive`.
-- Card details are stored in plain text. This is a simulation; a real issuer never stores the CVV and keeps card numbers in a tokenization vault.
-
-### 4. Process purchases
-
-Inputs: `card_number`, `merchant_name`, `merchant_category`, `amount_cents`. Category comes from a fixed dropdown.
-
-Qualified: `pharmacy, hospital, doctor, dental, vision, medical_equipment, lab`.
-Not qualified: `restaurant, grocery, electronics, gas, entertainment, retail, other`.
-
-`services.process_purchase(conn, card_number, merchant_name, merchant_category, amount_cents)`, all inside one `BEGIN IMMEDIATE`:
-
-```
-1. SELECT card by card_number
-     none              → 404, nothing stored
-     status=replaced   → declined card_inactive
-2. category not in QUALIFIED
-                       → declined not_qualified   (balance untouched)
-3. UPDATE accounts SET balance_cents = balance_cents - :amt
-     WHERE id = :account_id AND balance_cents >= :amt
-     rowcount == 0     → declined insufficient_funds
-     rowcount == 1     → approved
-4. INSERT INTO purchases (… status, decline_reason …)
-5. COMMIT
-```
-
-Order matters: a restaurant purchase with too little money is declined `not_qualified`, because that rule does not depend on the balance.
-
-## Concurrency
+## Concurrency handling
 
 The assignment's test: balance $100, purchase A $80 and purchase B $50 arrive at the same time. Exactly one must be approved and the balance must never go negative.
 
@@ -292,35 +317,7 @@ The same three guards work unchanged on Postgres (with row locks instead of a wh
 
 **Proof, visible** — the Make a purchase page has a "Concurrency test" panel: pick a count and an amount, click once, and `app.js` fires them all with `Promise.all(fetch…)`. The activity table fills with the approved/declined mix and the final balance.
 
-## UI
-
-Logged out: one panel with Log in / Sign up tabs, and the demo credentials under it.
-
-Logged in, the page is split the way a bank site is. Pages live behind the URL hash, so Back, Forward, and reload keep your place:
-
-| Page | Hash | Shows |
-|---|---|---|
-| Home | `#/` | Balance with Make a purchase and Deposit funds buttons, the debit card, last 5 activity rows |
-| Deposit | `#/deposit` | Current balance and the deposit form |
-| Make a purchase | `#/purchase` | Single purchase and concurrency test. Not in the nav (a nav item called "Purchases" reads like a history list); reached from the Home button |
-| Activity | `#/activity` | Full table: every deposit and purchase attempt, with decline reasons |
-
-- **Card details are hidden by default** (`•••• 1483`, expiry and CVV masked). Show details reveals them; changing page hides them again.
-- **Purchases have their own page** because on a real card they come from a store's terminal, not from the bank's site. The single-purchase form charges the active card automatically; "Use a different card" opens a field for testing a replaced card.
-- **Concurrency test** sends every listed amount as a pharmacy purchase with `Promise.all`, so the requests really overlap, and shows how many were approved and the balance left. Presets: $80 + $50, 10 × $30, 20 × $5.
-
-Every action re-fetches `GET /api/me` and redraws from the response. The cookie is the only thing that says who you are.
-
-## Run
-
-```
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt        # fastapi, uvicorn, bcrypt, pytest, httpx
-uvicorn main:app --reload              # http://localhost:8000
-pytest
-```
-
-## Tradeoffs to state in architecture.md
+## Design tradeoffs
 
 - **SQLite, not Postgres.** Zero setup for the reviewer. The write lock covers the whole database, which limits throughput but is correct for a single-node demo. The same SQL works on Postgres.
 - **Stored balance column, not computed from the tables.** Needed for the atomic guard; the integrity test keeps it honest.
@@ -331,6 +328,15 @@ pytest
 - **Categories in code.** Real systems use merchant category codes (MCC) from the card network.
 - **Deposits have no limit.** IRS annual contribution limits are a rule layer to add later.
 
-## Out of scope (list as improvements in the video)
+### Out of scope
 
 Refunds and disputes, pending → settled states, card freeze, family cards on one account, receipt substantiation, contribution limits, password reset, real MCC codes.
+
+## Run it
+
+```
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt        # fastapi, uvicorn, bcrypt, pytest, httpx
+uvicorn main:app --reload              # http://localhost:8000
+pytest
+```
