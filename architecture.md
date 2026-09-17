@@ -61,6 +61,7 @@ conn = sqlite3.connect(
     check_same_thread=False,  # FastAPI may open and close it on different threads; one request uses it one call at a time
 )
 conn.execute("PRAGMA foreign_keys=ON")
+conn.execute("PRAGMA synchronous=NORMAL")  # safe with WAL; trades the last commits on a power cut for speed
 conn.row_factory = sqlite3.Row
 ```
 
@@ -81,8 +82,11 @@ static/index.html
 static/app.js
 static/style.css
 tests/test_api.py        one happy-path + one failure test per endpoint, plus auth checks
+tests/test_unit.py       Luhn vectors, the error handler, transaction rollback behaviour
 tests/test_concurrency.py
 hsa.db*                  created at first run, git-ignored
+requirements.txt         runtime dependencies
+requirements-dev.txt     the above plus pytest and httpx
 README.md  architecture.md  ai-usage.md
 ```
 
@@ -99,9 +103,9 @@ Logged in, the page is split the way a bank site is. Pages live behind the URL h
 | Make a purchase | `#/purchase` | Single purchase and concurrency test. Not in the nav (a nav item called "Purchases" reads like a history list); reached from the Home button |
 | Activity | `#/activity` | Full table: every deposit and purchase attempt, with decline reasons |
 
-- **Card details are hidden by default** (`•••• 1483`, expiry and CVV masked). Show details reveals them; changing page hides them again.
+- **Card details are not in the page** unless the owner asks. The dashboard is sent only `last4`; **Show details** fetches the number, expiry and CVV from `GET /api/me/card/details`, and Hide, logging out, or changing page drops them from memory again. Masking them in the browser would have been decoration — anyone can read a response.
 - **Purchases have their own page** because on a real card they come from a store's terminal, not from the bank's site. The single-purchase form charges the active card automatically; "Use a different card" opens a field for testing a replaced card.
-- **Concurrency test** sends every listed amount as a pharmacy purchase with `Promise.all`, so the requests really overlap, and shows how many were approved and the balance left. Presets: $80 + $50, 10 × $30, 20 × $5.
+- **Concurrency test** starts every listed amount as a pharmacy purchase with `Promise.all`, and shows how many were approved and the balance left. Presets: $80 + $50, 10 × $30, 20 × $5. The browser opens about six connections per origin, so a 20-amount burst arrives in waves of about six rather than in one instant; `tests/test_concurrency.py` is what races them from real threads, both through `services` and through the HTTP path.
 
 Every action re-fetches `GET /api/me` and redraws from the response. The cookie is the only thing that says who you are.
 
@@ -116,19 +120,23 @@ All bodies and responses are JSON. Amounts are `amount_cents` integers.
 | POST | `/api/signup` | — | `{owner_name, email, password}` | 201, sets cookie; 409 email taken |
 | POST | `/api/login` | — | `{email, password}` | 200, sets cookie; 401 |
 | POST | `/api/logout` | cookie | — | 204, clears cookie |
-| GET | `/api/me` | cookie | — | account + active card + last 50 rows of `account_activity` (approved **and** declined) |
+| GET | `/api/me` | cookie | — | account + active card (`last4`, expiry, status — **no number, no CVV**) + last 50 rows of `account_activity` (approved **and** declined) |
 | POST | `/api/me/deposits` | cookie | `{amount_cents}` | 200 `{balance_cents, deposit}` |
-| POST | `/api/me/card` | cookie | — | 201 new card; replaces the active one if it exists |
-| POST | `/api/purchases` | — | `{card_number, merchant_name, merchant_category, amount_cents}` | 200 `{status, decline_reason, balance_cents, purchase}`; 404 unknown card |
-| GET | `/api/categories` | — | — | `{qualified: [...], not_qualified: [...]}` |
+| POST | `/api/me/card` | cookie | — | 201 new card, **including the full number** — the one moment the owner is shown it; replaces the active one if it exists |
+| GET | `/api/me/card/details` | cookie | — | 200 full number, expiry and CVV of the active card; 404 if there is none |
+| POST | `/api/purchases` | — | `{card_number, merchant_name, merchant_category, amount_cents, request_id?}` | 200 `{status, decline_reason, balance_cents, purchase}`; 404 unknown card |
+| GET | `/api/categories` | — | — | `{qualified: [...], not_qualified: [...], max_amount_cents}` |
 
 - **`/api/purchases` takes no session.** It plays the role of the card network: a merchant sends the card number, not the cardholder's login. The card number is the credential, as with a real card. The UI pre-fills the logged-in user's card number.
+- **The card number is never sent back on a read.** `GET /api/me` runs on every page load, so it carries only `last4`. The full number and CVV come from `GET /api/me/card/details`, which the page calls only when the owner clicks **Show details**, and from the 201 that issues the card. Hiding the number in the browser would not have hidden it from anyone reading the response.
+- **`request_id` is optional and makes a retry safe.** The same id sent twice returns the first result and charges nothing more. Without it, a retried POST is a second purchase, which is the correct reading of a second unlabelled request.
 - **A declined purchase is HTTP 200** with `status: "declined"`. It is a valid business outcome, not an error. 4xx is only for bad input, missing auth, or an unknown card.
 
 ### Auth
 
 - **Sign up:** `owner_name`, `email`, `password` (min 8 characters). The password is hashed with `bcrypt` and the account row is inserted. A duplicate email hits the `UNIQUE` constraint → 409. Signing up also logs you in.
-- **Log in:** look up by email, `bcrypt.checkpw`. Wrong email and wrong password return the same 401 message, so the response does not reveal which emails exist.
+- **Log in:** look up by email, `bcrypt.checkpw`. Wrong email and wrong password return the same 401 message, so the response does not reveal which emails exist. Login does not validate the password's length: bcrypt only reads the first 72 bytes, so the input is cut there and any wrong credential comes back as 401 rather than 422. Sign-up still refuses a password over 72 bytes outright, where the message is useful.
+- **Sign-up and log in are each one transaction:** the account row and the session row are written together, so a failure cannot leave an account that nobody can log into.
 - **Session:** `secrets.token_urlsafe(32)` goes to the browser in a cookie (`HttpOnly`, `SameSite=Lax`, 7-day expiry). The database stores only its sha256, so a leaked database cannot be used to log in.
 - **Every `/api/me/*` route** depends on `current_account`: read cookie → hash → look up an unexpired session → `account_id`, else 401. Services only ever see that `account_id`, so one user cannot act on another's account.
 - **Log out** deletes the session row and clears the cookie.
@@ -214,16 +222,17 @@ CREATE TABLE sessions (
   account_id    INTEGER NOT NULL REFERENCES accounts(id),
   expires_at    TEXT    NOT NULL
 );
+CREATE INDEX idx_sessions_expires ON sessions(expires_at);   -- expired rows are swept on login
 
 CREATE TABLE cards (
   id            INTEGER PRIMARY KEY,
   account_id    INTEGER NOT NULL REFERENCES accounts(id),
   card_number   TEXT    NOT NULL UNIQUE,                  -- 16 digits, Luhn-valid, fake
-  expiry_month  INTEGER NOT NULL,
-  expiry_year   INTEGER NOT NULL,
-  cvv           TEXT    NOT NULL,
+  expiry_month  INTEGER NOT NULL CHECK (expiry_month BETWEEN 1 AND 12),
+  expiry_year   INTEGER NOT NULL CHECK (expiry_year >= 2000),
+  cvv           TEXT    NOT NULL CHECK (length(cvv) = 3),
   status        TEXT    NOT NULL DEFAULT 'active' CHECK (status IN ('active','replaced')),
-  created_at    TEXT    NOT NULL DEFAULT (datetime('now'))
+  created_at    TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now'))
 );
 -- at most one active card per account; any number of replaced ones
 CREATE UNIQUE INDEX one_active_card_per_account ON cards(account_id) WHERE status = 'active';
@@ -232,7 +241,7 @@ CREATE TABLE deposits (
   id            INTEGER PRIMARY KEY,
   account_id    INTEGER NOT NULL REFERENCES accounts(id),
   amount_cents  INTEGER NOT NULL CHECK (amount_cents > 0),
-  created_at    TEXT    NOT NULL DEFAULT (datetime('now'))
+  created_at    TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now'))
 );
 
 CREATE TABLE purchases (
@@ -244,15 +253,17 @@ CREATE TABLE purchases (
   amount_cents      INTEGER NOT NULL CHECK (amount_cents > 0),
   status            TEXT    NOT NULL,
   decline_reason    TEXT,
-  created_at        TEXT    NOT NULL DEFAULT (datetime('now')),
+  request_id        TEXT    UNIQUE,   -- optional; a retry with the same id is not charged twice
+  created_at        TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now')),
   CHECK (
     (status = 'approved' AND decline_reason IS NULL) OR
     (status = 'declined' AND decline_reason IN ('card_inactive','not_qualified','insufficient_funds'))
   )
 );
 
-CREATE INDEX idx_deposits_account  ON deposits(account_id);
-CREATE INDEX idx_purchases_account ON purchases(account_id);
+-- created_at leads the sort in the activity query, so it belongs in the index
+CREATE INDEX idx_deposits_account  ON deposits(account_id, created_at);
+CREATE INDEX idx_purchases_account ON purchases(account_id, created_at);
 
 -- one place to read all money activity; nothing to keep in step
 CREATE VIEW account_activity AS
@@ -277,7 +288,8 @@ Decisions:
 - **`card_number` is unique** because purchases find the account by card number. A duplicate would make the paying account ambiguous. On a random collision, generate again.
 - **One card belongs to one account.** A purchase must debit exactly one account, and real HSAs are individually owned. Family cards (many cards on one account) are a future improvement.
 - **`active` / `replaced`,** not `active` / `inactive`. `replaced` says the card can never come back. A reversible `frozen` state is added only if a freeze feature is built.
-- **`created_at`** exists only where it is shown or used for order: cards, deposits, purchases. It has one-second precision, so concurrent purchases share a time. The view is sorted by `created_at DESC, id DESC`.
+- **`created_at`** exists only where it is shown or used for order: cards, deposits, purchases. It is written with millisecond precision (`strftime('%Y-%m-%d %H:%M:%f','now')`), because **order comes from the timestamp, not from the id**: deposits and purchases have separate id sequences, so `id` cannot compare a deposit with a purchase. With one-second precision a deposit and a purchase made in the same second came back in the wrong order. Two rows written inside the same millisecond can still tie, and then the ordering between the two tables is again arbitrary; a single `ledger` table with one id sequence is the real fix and is the change to make if this grows.
+- **No migrations.** The schema is created with `CREATE TABLE IF NOT EXISTS`, so a column change does not reach an existing `hsa.db`. After a schema change, delete `hsa.db*`. The view is dropped and recreated on every start, so it always matches the code.
 - **Merchant categories are a Python constant,** not a table. The assignment does not ask for editing them.
 
 ## Concurrency handling
@@ -327,16 +339,21 @@ The same three guards work unchanged on Postgres (with row locks instead of a wh
 - **Card data in plain text.** Simulation only.
 - **Categories in code.** Real systems use merchant category codes (MCC) from the card network.
 - **Deposits have no limit.** IRS annual contribution limits are a rule layer to add later.
+- **`PRAGMA synchronous = NORMAL` with WAL.** Every committed transaction stays consistent and the database cannot be corrupted, but the WAL is not fsynced on each commit, so a host crash or power cut can lose the last few commits. For a local simulation that trade buys a large write speed-up; a real ledger would use `FULL`.
+- **Frontend logic is checked by hand, not by tests.** `parseDollars`, `formatCents` and `formatTime` are pure and worth unit tests, but adding a JavaScript test runner to a Python take-home costs more than it returns here. Everything they feed is validated again on the server, which is tested.
 
 ### Out of scope
 
 Refunds and disputes, pending → settled states, card freeze, family cards on one account, receipt substantiation, contribution limits, password reset, real MCC codes.
 
+- **No rate limiting.** `/api/login` accepts unlimited password attempts, and `/api/purchases` is unauthenticated by design — it plays the card network — so it accepts unlimited card-number guessing. A real system would apply per-IP and per-account limits on login, and velocity and fraud checks on the card, plus an alert on repeated unknown-card 404s. A limiter is not built here because it would need shared state that SQLite and a single process make uninteresting to demonstrate.
+- **Pagination.** The activity list is the newest 50 rows, with no way to page back further.
+
 ## Run it
 
 ```
 python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt        # fastapi, uvicorn, bcrypt, pytest, httpx
+pip install -r requirements-dev.txt    # fastapi, uvicorn, bcrypt + pytest, httpx
 uvicorn main:app --reload              # http://localhost:8000
 pytest
 ```

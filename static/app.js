@@ -13,8 +13,9 @@ const app = document.getElementById("app");
 const sessionBox = document.getElementById("session");
 const navBox = document.getElementById("nav");
 let categories = { qualified: [], not_qualified: [] };
+let maxAmountCents = null; // served by /api/categories, so the page checks the server's cap
 let lastData = null; // last GET /api/me response, for redraws that need no new data
-let cardRevealed = false; // card details are hidden until the owner asks
+let cardDetails = null; // full number/CVV, held only while the owner is looking at them
 let lastBurst = null; // result of the last concurrency test, kept across redraws
 
 // ---------- helpers ----------
@@ -73,6 +74,9 @@ function parseDollars(text) {
 function requireDollars(text) {
   const cents = parseDollars(text);
   if (cents === null || cents <= 0) throw new Error(`"${text}" is not an amount like 25 or 25.50`);
+  if (maxAmountCents !== null && cents > maxAmountCents) {
+    throw new Error(`The most you can send in one request is ${formatCents(maxAmountCents)}.`);
+  }
   return cents;
 }
 
@@ -162,11 +166,12 @@ function currentPage() {
 async function boot() {
   try {
     categories = await api("/api/categories");
+    maxAmountCents = categories.max_amount_cents ?? null;
   } catch (error) {
     toast(error.message, "error");
   }
   window.addEventListener("hashchange", () => {
-    cardRevealed = false;
+    cardDetails = null;
     refresh();
   });
   await refresh();
@@ -184,16 +189,27 @@ async function refresh() {
 async function logout() {
   await api("/api/logout", { method: "POST" });
   lastBurst = null;
-  cardRevealed = false;
+  cardDetails = null;
   history.replaceState(null, "", location.pathname);
   renderAuth("login");
 }
 
 async function issueCard() {
+  // POST /api/me/card is the one response that carries the full number. Everything after
+  // this asks /api/me/card/details, and only when the owner does.
   const card = await api("/api/me/card", { method: "POST" });
   toast(`Card ending ${card.card_number.slice(-4)} is now active`, "ok");
-  cardRevealed = false;
+  cardDetails = null;
   await refresh();
+}
+
+async function activeCardNumber() {
+  return (await api("/api/me/card/details")).card_number;
+}
+
+async function toggleCardDetails() {
+  cardDetails = cardDetails ? null : await api("/api/me/card/details");
+  renderDashboard(lastData);
 }
 
 function purchaseBody(cardNumber, merchantName, category, amountCents) {
@@ -305,7 +321,7 @@ function homePage({ account, card, activity }) {
       h("section", { class: "panel" },
         h("div", { class: "panel-head" },
           h("h2", {}, "Recent activity"),
-          activity.length > 5 && h("a", { href: "#/activity", class: "small" }, "View all")),
+          activity.length > 5 && h("a", { href: "#/activity", class: "small" }, "View activity")),
         activityTable(activity.slice(0, 5), { compact: true }))),
   ];
 }
@@ -348,7 +364,7 @@ function purchasePage({ account, card }) {
     h("section", { class: "panel intro" },
       h("h1", {}, "Make a purchase"),
       h("p", {}, "Balance ", h("strong", {}, formatCents(account.balance_cents)),
-        card ? ` · card ending ${card.card_number.slice(-4)}` : " · no active card")),
+        card ? ` · card ending ${card.last4}` : " · no active card")),
     h("div", { class: "grid" }, purchasePanel(card), concurrencyPanel(card)),
   ];
 }
@@ -363,9 +379,11 @@ function cardPanel(account, card) {
       actionButton("Issue card", "primary", issueCard));
   }
 
-  const last4 = card.card_number.slice(-4);
+  const revealed = cardDetails !== null;
   const expiry = `${String(card.expiry_month).padStart(2, "0")}/${String(card.expiry_year).slice(-2)}`;
-  const number = cardRevealed ? card.card_number.replace(/(\d{4})(?=\d)/g, "$1 ") : `•••• •••• •••• ${last4}`;
+  const number = revealed
+    ? cardDetails.card_number.replace(/(\d{4})(?=\d)/g, "$1 ")
+    : `•••• •••• •••• ${card.last4}`;
 
   return h("section", { class: "panel" },
     h("h2", {}, "Debit card"),
@@ -374,18 +392,24 @@ function cardPanel(account, card) {
       h("span", { class: "card-number" }, number),
       h("div", { class: "card-meta" },
         h("span", {}, account.owner_name.toUpperCase()),
-        h("span", {}, `EXP ${cardRevealed ? expiry : "••/••"}`),
-        h("span", {}, `CVV ${cardRevealed ? card.cvv : "•••"}`))),
+        h("span", {}, `EXP ${revealed ? expiry : "••/••"}`),
+        h("span", {}, `CVV ${revealed ? cardDetails.cvv : "•••"}`))),
     h("div", { class: "row" },
       h("button", {
         type: "button",
         class: "ghost",
-        "aria-pressed": String(cardRevealed),
-        onclick: () => {
-          cardRevealed = !cardRevealed;
-          renderDashboard(lastData);
+        "aria-pressed": String(revealed),
+        onclick: async (event) => {
+          const button = event.currentTarget;
+          button.disabled = true;
+          try {
+            await toggleCardDetails();
+          } catch (error) {
+            toast(error.message, "error");
+            button.disabled = false;
+          }
         },
-      }, cardRevealed ? "Hide details" : "Show details"),
+      }, revealed ? "Hide details" : "Show details"),
       actionButton("Replace card", "ghost", async () => {
         if (!confirm("Replace this card? The current number will stop working.")) return;
         await issueCard();
@@ -411,11 +435,12 @@ function purchasePanel(card) {
   return h("section", { class: "panel" },
     h("h2", {}, "Single purchase"),
     h("p", { class: "muted small" },
-      card ? `Card ending ${card.card_number.slice(-4)} · ` : "No active card · ", toggle),
+      card ? `Card ending ${card.last4} · ` : "No active card · ", toggle),
     h("form", {
       class: "stack",
       onsubmit: onSubmit(async (data) => {
-        const cardNumber = otherCardField.hidden ? card?.card_number : data.get("card_number");
+        if (otherCardField.hidden && !card) throw new Error("Issue a card first, or enter a card number.");
+        const cardNumber = otherCardField.hidden ? await activeCardNumber() : data.get("card_number");
         if (!cardNumber) throw new Error("Issue a card first, or enter a card number.");
         const body = purchaseBody(cardNumber, data.get("merchant_name"),
           data.get("merchant_category"), requireDollars(data.get("amount")));
@@ -440,11 +465,12 @@ function concurrencyPanel(card) {
       const amounts = data.get("amounts").split(",").map((s) => s.trim()).filter(Boolean).map(requireDollars);
       if (amounts.length < 2 || amounts.length > 50) throw new Error("Enter between 2 and 50 amounts.");
 
-      // All requests leave the browser together; the server decides which ones fit.
+      const cardNumber = await activeCardNumber();
+      // Every request is started together; the server decides which ones fit.
       const results = await Promise.all(amounts.map((cents) =>
         api("/api/purchases", {
           method: "POST",
-          body: purchaseBody(card.card_number, "Concurrency test", "pharmacy", cents),
+          body: purchaseBody(cardNumber, "Concurrency test", "pharmacy", cents),
         })));
 
       const approved = results.filter((r) => r.status === "approved");
@@ -475,7 +501,9 @@ function concurrencyPanel(card) {
   return h("section", { class: "panel" },
     h("h2", {}, "Concurrency test"),
     h("p", { class: "muted small" },
-      "Sends every amount as a pharmacy purchase at the same time."),
+      "Sends every amount as a pharmacy purchase together. The browser opens about six ",
+      "connections at a time, so they arrive in a tight burst rather than a single instant. ",
+      h("code", {}, "tests/test_concurrency.py"), " races them from real threads."),
     form,
     lastBurst && h("div", { class: "burst" },
       h("p", {}, `Sent ${lastBurst.sent} at once: `,

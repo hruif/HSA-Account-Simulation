@@ -12,19 +12,26 @@ from db import get_db
 SESSION_COOKIE = "hsa_session"
 SESSION_DAYS = 7
 BCRYPT_ROUNDS = 12
+BCRYPT_MAX_BYTES = 72
 
 # Checked when the email is unknown, so that case takes as long as a wrong password.
 _DUMMY_HASH = bcrypt.hashpw(b"no-such-account", bcrypt.gensalt(BCRYPT_ROUNDS))
 
 
+def _bcrypt_bytes(password: str) -> bytes:
+    # bcrypt ignores everything past 72 bytes and refuses to be handed more, so cutting
+    # here changes no outcome. Signup still rejects an over-long password outright.
+    return password.encode()[:BCRYPT_MAX_BYTES]
+
+
 def hash_password(password: str) -> str:
-    return bcrypt.hashpw(password.encode(), bcrypt.gensalt(BCRYPT_ROUNDS)).decode()
+    return bcrypt.hashpw(_bcrypt_bytes(password), bcrypt.gensalt(BCRYPT_ROUNDS)).decode()
 
 
 def authenticate(conn: sqlite3.Connection, email: str, password: str) -> int | None:
     row = conn.execute("SELECT id, password_hash FROM accounts WHERE email = ?", (email,)).fetchone()
     stored = row["password_hash"].encode() if row else _DUMMY_HASH
-    matches = bcrypt.checkpw(password.encode(), stored)
+    matches = bcrypt.checkpw(_bcrypt_bytes(password), stored)
     return row["id"] if row and matches else None
 
 

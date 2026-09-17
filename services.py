@@ -76,8 +76,19 @@ def process_purchase(
     merchant_name: str,
     merchant_category: str,
     amount_cents: int,
+    request_id: str | None = None,
 ) -> dict:
     with transaction(conn):
+        if request_id is not None:
+            # A retry of a request that already ran returns what it returned, without
+            # charging again. The lookup is inside the write lock, so two identical
+            # requests cannot both miss it.
+            done = conn.execute(
+                "SELECT * FROM purchases WHERE request_id = ?", (request_id,)
+            ).fetchone()
+            if done is not None:
+                return _purchase_result(conn, done)
+
         card = conn.execute(
             "SELECT id, account_id, status FROM cards WHERE card_number = ?", (card_number,)
         ).fetchone()
@@ -100,8 +111,8 @@ def process_purchase(
 
         row = conn.execute(
             """INSERT INTO purchases (account_id, card_id, merchant_name, merchant_category,
-                                      amount_cents, status, decline_reason)
-               VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING *""",
+                                      amount_cents, status, decline_reason, request_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING *""",
             (
                 card["account_id"],
                 card["id"],
@@ -110,14 +121,19 @@ def process_purchase(
                 amount_cents,
                 "approved" if decline_reason is None else "declined",
                 decline_reason,
+                request_id,
             ),
         ).fetchall()[0]
-        balance = _balance(conn, card["account_id"])
+        result = _purchase_result(conn, row)
 
+    return result
+
+
+def _purchase_result(conn: sqlite3.Connection, row: sqlite3.Row) -> dict:
     return {
         "status": row["status"],
         "decline_reason": row["decline_reason"],
-        "balance_cents": balance,
+        "balance_cents": _balance(conn, row["account_id"]),
         "purchase": dict(row),
     }
 
@@ -127,8 +143,10 @@ def get_dashboard(conn: sqlite3.Connection, account_id: int) -> dict:
         account = conn.execute(
             "SELECT id, owner_name, email, balance_cents FROM accounts WHERE id = ?", (account_id,)
         ).fetchone()
+        # No card number and no CVV here: this runs on every page load. The owner reads
+        # them from get_card_details, one request at a time, when they ask to see them.
         card = conn.execute(
-            """SELECT id, card_number, expiry_month, expiry_year, cvv, status
+            """SELECT id, substr(card_number, -4) AS last4, expiry_month, expiry_year, status
                FROM cards WHERE account_id = ? AND status = 'active'""",
             (account_id,),
         ).fetchone()
@@ -142,6 +160,18 @@ def get_dashboard(conn: sqlite3.Connection, account_id: int) -> dict:
         "card": dict(card) if card else None,
         "activity": [dict(r) for r in activity],
     }
+
+
+def get_card_details(conn: sqlite3.Connection, account_id: int) -> dict:
+    """The full number, expiry and CVV of the account's active card. Owner-only."""
+    row = conn.execute(
+        """SELECT id, card_number, expiry_month, expiry_year, cvv, status
+           FROM cards WHERE account_id = ? AND status = 'active'""",
+        (account_id,),
+    ).fetchone()
+    if row is None:
+        raise CardNotFound("No active card.")
+    return dict(row)
 
 
 def account_count(conn: sqlite3.Connection) -> int:

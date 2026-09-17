@@ -13,7 +13,7 @@ import auth
 import db
 import services
 from categories import NOT_QUALIFIED, QUALIFIED
-from models import DepositIn, LoginIn, PurchaseIn, SignupIn
+from models import MAX_AMOUNT_CENTS, DepositIn, LoginIn, PurchaseIn, SignupIn
 
 STATIC_DIR = Path(__file__).parent / "static"
 DEMO_EMAIL = "demo@example.com"  # also shown in static/app.js
@@ -49,7 +49,8 @@ DOMAIN_ERROR_STATUS = {services.EmailTaken: 409, services.CardNotFound: 404}
 
 @app.exception_handler(services.DomainError)
 async def domain_error(request: Request, exc: services.DomainError) -> JSONResponse:
-    return JSONResponse({"detail": str(exc)}, status_code=DOMAIN_ERROR_STATUS[type(exc)])
+    # .get, not [...]: DomainError itself and any future subclass must not KeyError here.
+    return JSONResponse({"detail": str(exc)}, status_code=DOMAIN_ERROR_STATUS.get(type(exc), 400))
 
 
 @app.middleware("http")
@@ -76,8 +77,10 @@ async def revalidate_static_files(request: Request, call_next):
 @app.post("/api/signup", status_code=201)
 def signup(body: SignupIn, response: Response, conn: Conn):
     password_hash = auth.hash_password(body.password)
-    account_id = services.signup(conn, body.owner_name, body.email, password_hash)
-    auth.start_session(conn, response, account_id)
+    # One transaction: either the account and its session both exist, or neither does.
+    with db.transaction(conn):
+        account_id = services.signup(conn, body.owner_name, body.email, password_hash)
+        auth.start_session(conn, response, account_id)
     return services.get_dashboard(conn, account_id)
 
 
@@ -86,7 +89,8 @@ def login(body: LoginIn, response: Response, conn: Conn):
     account_id = auth.authenticate(conn, body.email, body.password)
     if account_id is None:
         return JSONResponse({"detail": "Incorrect email or password."}, status_code=401)
-    auth.start_session(conn, response, account_id)
+    with db.transaction(conn):
+        auth.start_session(conn, response, account_id)
     return services.get_dashboard(conn, account_id)
 
 
@@ -111,7 +115,14 @@ def deposit(body: DepositIn, account_id: AccountId, conn: Conn):
 
 @app.post("/api/me/card", status_code=201)
 def issue_card(account_id: AccountId, conn: Conn):
+    # The one moment the owner is shown the full card: right after it is issued.
     return services.issue_card(conn, account_id)
+
+
+@app.get("/api/me/card/details")
+def card_details(account_id: AccountId, conn: Conn):
+    """Full number, expiry and CVV. Asked for only when the owner clicks Show details."""
+    return services.get_card_details(conn, account_id)
 
 
 @app.post("/api/purchases")
@@ -122,7 +133,12 @@ def purchase(body: PurchaseIn, conn: Conn):
 
 @app.get("/api/categories")
 def categories():
-    return {"qualified": QUALIFIED, "not_qualified": NOT_QUALIFIED}
+    # max_amount_cents travels with this so the browser checks the same cap as the server.
+    return {
+        "qualified": QUALIFIED,
+        "not_qualified": NOT_QUALIFIED,
+        "max_amount_cents": MAX_AMOUNT_CENTS,
+    }
 
 
 app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")

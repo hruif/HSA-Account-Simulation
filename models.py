@@ -26,6 +26,9 @@ Email = Annotated[
     StringConstraints(strip_whitespace=True, max_length=254, pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$"),
 ]
 Password = Annotated[str, AfterValidator(_fits_bcrypt)]
+# Login does not enforce the 72-byte bcrypt limit: a password that is too long is simply
+# wrong, and every wrong credential must come back as 401, not 422.
+GivenPassword = Annotated[str, StringConstraints(max_length=1024)]
 AmountCents = Annotated[int, Field(strict=True, gt=0, le=MAX_AMOUNT_CENTS)]
 
 
@@ -41,7 +44,7 @@ class SignupIn(_Body):
 
 class LoginIn(_Body):
     email: Annotated[str, StringConstraints(strip_whitespace=True, max_length=254)]
-    password: Password
+    password: GivenPassword
 
 
 class DepositIn(_Body):
@@ -53,3 +56,5 @@ class PurchaseIn(_Body):
     merchant_name: Name
     merchant_category: Annotated[str, AfterValidator(_known_category)]
     amount_cents: AmountCents
+    # Optional. Send the same one again to retry safely: the purchase is not charged twice.
+    request_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=64)] | None = None
