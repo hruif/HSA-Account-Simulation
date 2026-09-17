@@ -5,3 +5,4 @@ hsa.db
 hsa.db-wal
 hsa.db-shm
 .claude/
+.DS_Store
