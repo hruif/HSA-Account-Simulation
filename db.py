@@ -61,7 +61,8 @@ CREATE TABLE IF NOT EXISTS purchases (
   created_at        TEXT    NOT NULL DEFAULT {NOW},
   CHECK (
     (status = 'approved' AND decline_reason IS NULL) OR
-    (status = 'declined' AND decline_reason IN ('card_inactive', 'not_qualified', 'insufficient_funds'))
+    (status = 'declined' AND decline_reason IN
+       ('card_inactive', 'card_expired', 'not_qualified', 'insufficient_funds'))
   )
 );
 

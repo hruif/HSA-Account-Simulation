@@ -195,17 +195,19 @@ Not qualified: `restaurant, grocery, electronics, gas, entertainment, retail, ot
 1. SELECT card by card_number
      none              → 404, nothing stored
      status=replaced   → declined card_inactive
-2. category not in QUALIFIED
+2. expiry_year/month before this month
+                       → declined card_expired    (balance untouched)
+3. category not in QUALIFIED
                        → declined not_qualified   (balance untouched)
-3. UPDATE accounts SET balance_cents = balance_cents - :amt
+4. UPDATE accounts SET balance_cents = balance_cents - :amt
      WHERE id = :account_id AND balance_cents >= :amt
      rowcount == 0     → declined insufficient_funds
      rowcount == 1     → approved
-4. INSERT INTO purchases (… status, decline_reason …)
-5. COMMIT
+5. INSERT INTO purchases (… status, decline_reason …)
+6. COMMIT
 ```
 
-Order matters: a restaurant purchase with too little money is declined `not_qualified`, because that rule does not depend on the balance.
+Order matters, and it runs cheapest and most specific first: a restaurant purchase with too little money is declined `not_qualified`, because that rule does not depend on the balance, and a dead card is reported as dead whatever was being bought. A card is good through the last day of its expiry month, as a real card is. Cards are issued three years out, so `card_expired` is unreachable in a demo session; the tests reach it by ageing a card row directly.
 
 ## Data model
 
@@ -258,7 +260,8 @@ CREATE TABLE purchases (
   created_at        TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now')),
   CHECK (
     (status = 'approved' AND decline_reason IS NULL) OR
-    (status = 'declined' AND decline_reason IN ('card_inactive','not_qualified','insufficient_funds'))
+    (status = 'declined' AND decline_reason IN
+       ('card_inactive','card_expired','not_qualified','insufficient_funds'))
   )
 );
 
@@ -333,16 +336,16 @@ The same three guards work unchanged on Postgres (with row locks instead of a wh
 ## Design tradeoffs
 
 - **SQLite, not Postgres.** Zero setup for the reviewer. The write lock covers the whole database, which limits throughput but is correct for a single-node demo. The same SQL works on Postgres.
-- **A new connection per request, not a pool.** A pool would be safe — it lends each request a connection of its own and takes it back, which is the part that matters; what is never safe is two requests using one connection at the same time, for the transaction-state reason above. The pool is skipped because it buys nothing: `sqlite3.connect` on a local file costs microseconds, next to a `BEGIN IMMEDIATE` that waits for the write lock. A server where opening a connection means a network handshake and authentication, as with Postgres, needs one.
+- **A new connection per request, not a pool.** A pool is safe — it lends each request a connection of its own — and what is never safe is two requests sharing one, for the reason above. It is skipped because it buys nothing here: opening a local SQLite file costs microseconds. A database reached over a network, where a connection means a handshake and a login, needs one.
 - **Stored balance column, not computed from the tables.** Computing it is O(history) per read, and only this shape lets the database enforce "never negative" at all: a `CHECK` cannot sum other tables, so `CHECK (balance_cents >= 0)` would have to become a trigger or application code. The cost is derived data with no database-level tie to the ledger: every writer must keep it in step, and here only a test checks that it did.
-- **Separate `deposits` and `purchases` tables with a view,** not one wide table or a parent table. Each table then holds only columns that are always meaningful, so `merchant_name`, `merchant_category` and the `status`/`decline_reason` CHECK can be `NOT NULL` and actually enforced; in one wide table they would all be nullable and that CHECK would have to exempt deposits. Four costs come with it. The two tables have separate id sequences, so only `created_at` can order a deposit against a purchase — the timestamp bullet below is that cost. `account_activity` is a `UNION ALL`, so the activity query reads every row of both tables for the account and sorts them before the `LIMIT 50`; the per-table indexes cannot serve the combined sort. A third kind of money movement — a refund, a fee, interest — means a new table and an edit to the view, not just an insert. And a view has no primary key, so nothing can foreign-key to "an activity row"; a disputes table would have to store a type tag plus an id. One `ledger` table fixes all four and pays for it with the nullable columns.
+- **Separate `deposits` and `purchases` tables with a view,** not one wide table or a parent table. Every column is then always meaningful, so the merchant fields and the `status`/`decline_reason` rule can be `NOT NULL` and enforced by the database instead of by convention. It costs an id sequence the two tables cannot share, a view that reads and sorts both tables to list activity, a new table and a view edit for each new kind of money movement, and no key for anything to point at an activity row. One `ledger` table buys all of that back and pays for it in nullable columns.
 - **Minimal auth.** No email verification, password reset, login rate limiting, or session rotation.
-- **Purchase endpoint trusts the card number.** No merchant authentication, CVV/expiry check, or fraud rules.
+- **Purchase endpoint trusts the card number.** Status and expiry are checked; the CVV is not, and there is no merchant authentication and no fraud or velocity rules.
 - **Card data in plain text.** Simulation only.
 - **Categories in code.** Real systems use merchant category codes (MCC) from the card network.
-- **No IRS contribution limit on deposits.** The only cap is technical: `MAX_AMOUNT_CENTS`, $1,000,000 per request, which is there to bound the input, not to model the law. The real rule for 2026 is $4,400 a year for self-only coverage and $8,750 for family, plus $1,000 more from age 55 (Rev. Proc. 2025-19). Enforcing it is a data model change, not a rule layer: `accounts` would need coverage type and date of birth, every deposit would need the tax year it counts against, and contributions made through payroll or a second custodian would have to be counted too, because the limit is per person per year and not per account.
-- **One `CREATE TABLE ... IF NOT EXISTS` script, no migrations.** `init_db()` runs the whole schema on every start, so the reviewer needs no extra tool and the current shape is one readable block that the tests rebuild in a single call. The cost is that it only adds missing tables: change a column and an existing `hsa.db` keeps the old shape until it is deleted. Numbered migration files with an applied-migrations table are what a deployed system needs; here there is no old data anywhere to upgrade: `hsa.db*` is git-ignored and never committed, so a clone has no database at all and the first run builds the current schema. Only a checkout that has already been run needs the file deleted after a schema change.
-- **Order comes from a millisecond timestamp, not from one id sequence.** `deposits` and `purchases` have separate ids, so nothing but `created_at` can put a deposit and a purchase in order. At one-second precision they came back in the wrong order, which is why the default is now `strftime('%Y-%m-%d %H:%M:%f','now')`. Two rows written inside the same millisecond can still tie, and then their order is arbitrary again: measured at about 33 writes per millisecond when a script drives the service layer flat out, and never in a browser, where a round trip is far longer. The effect is confined to how two rows are listed — balances and approvals are decided by the `UPDATE`, not by this sort — so it did not justify the fix that removes it, which is one `ledger` table with a single id sequence. That is the change to make if this grows.
+- **No IRS contribution limit on deposits.** The only cap is technical, there to bound the input rather than model the law. Enforcing the real one is a data model change, not a rule layer: it applies per person per tax year, so accounts would need coverage type and age, deposits would need a tax year, and contributions made through payroll or another custodian would have to count against it too.
+- **One `CREATE TABLE ... IF NOT EXISTS` script, no migrations.** `init_db()` runs the whole schema on every start, so there is no extra tool and the live shape is one readable block. The cost is that it only adds what is missing: change a column and an existing database keeps the old shape until it is deleted. That is survivable only because there is no data to preserve — the database file is git-ignored, so a clone starts without one.
+- **Order comes from the timestamp, not from one id sequence.** The two tables have separate ids, so only `created_at` can put a deposit and a purchase in order, and at one-second precision they came back wrong — which is why it now carries milliseconds. Rows written inside the same millisecond can still tie. That changes how two rows are listed and never a balance, so the fix that removes it, one `ledger` table, was not worth making here.
 - **`PRAGMA synchronous = NORMAL` with WAL.** Every committed transaction stays consistent and the database cannot be corrupted, but the WAL is not fsynced on each commit, so a host crash or power cut can lose the last few commits. For a local simulation that trade buys a large write speed-up; a real ledger would use `FULL`.
 - **No automated browser tests.** jsdom or Playwright would cover the page, and anything with real users needs them, because hand-checking a UI does not scale. Here the server already refuses whatever a broken page could send, and those paths are tested, so the risk left over did not justify a second toolchain in a Python project. What that misses is anything the server cannot see, such as whether the card number leaves the page's memory.
 - **Native ES modules, no bundler.** `index.html` loads `app.js` with `type="module"`, so the split above needs no build step, no `node_modules` and no source maps. The same mechanism is what would split `app.js` further, one file per page, if the app grew.

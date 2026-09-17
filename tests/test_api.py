@@ -1,4 +1,5 @@
 import re
+from datetime import date, timedelta
 
 import pytest
 
@@ -31,6 +32,19 @@ def purchase(client, card_number, cents, category="pharmacy", merchant="CVS"):
             "amount_cents": cents,
         },
     )
+
+
+def expire_card(card_number, expiry=(2020, 1)):
+    """Age a card past its expiry month. Cards are issued 3 years out, so nothing
+    that the app itself can do produces an expired card inside a test run."""
+    conn = db.connect()
+    try:
+        conn.execute(
+            "UPDATE cards SET expiry_year = ?, expiry_month = ? WHERE card_number = ?",
+            (*expiry, card_number),
+        )
+    finally:
+        conn.close()
 
 
 def balance(client):
@@ -333,6 +347,40 @@ def test_card_inactive_outranks_the_other_decline_reasons(client):
     for cents, category in ((10_00, "restaurant"), (999_00, "pharmacy"), (999_00, "restaurant")):
         r = purchase(client, old, cents, category=category).json()
         assert r["decline_reason"] == "card_inactive"
+
+
+def test_expired_card_is_declined_without_touching_balance(client):
+    card = funded_card(client)
+    expire_card(card)
+    r = purchase(client, card, 25_00).json()
+    assert (r["status"], r["decline_reason"]) == ("declined", "card_expired")
+    assert balance(client) == 100_00
+
+
+def test_a_card_is_good_through_the_last_day_of_its_expiry_month(client):
+    card = funded_card(client)
+    today = date.today()
+    expire_card(card, (today.year, today.month))  # expires at the end of this month
+    assert purchase(client, card, 25_00).json()["status"] == "approved"
+
+    last_month = date(today.year, today.month, 1) - timedelta(days=1)
+    expire_card(card, (last_month.year, last_month.month))
+    assert purchase(client, card, 25_00).json()["decline_reason"] == "card_expired"
+
+
+def test_expiry_is_checked_before_the_category_and_the_balance(client):
+    card = funded_card(client)
+    expire_card(card)
+    for cents, category in ((10_00, "restaurant"), (999_00, "pharmacy")):
+        r = purchase(client, card, cents, category=category).json()
+        assert r["decline_reason"] == "card_expired"
+
+
+def test_card_inactive_outranks_an_expired_card(client):
+    old = funded_card(client)
+    expire_card(old)
+    client.post("/api/me/card")  # replaces it, so it is both replaced and expired
+    assert purchase(client, old, 25_00).json()["decline_reason"] == "card_inactive"
 
 
 def test_same_request_id_is_charged_only_once(client):

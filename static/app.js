@@ -6,6 +6,7 @@ import { formatCents, formatTime, labelFor, parseDollars } from "./format.js";
 const DEMO = { email: "demo@example.com", password: "demo-password" }; // seeded in main.py
 const DECLINE_LABELS = {
   card_inactive: "card was replaced",
+  card_expired: "card has expired",
   not_qualified: "not a qualified medical expense",
   insufficient_funds: "insufficient funds",
 };

@@ -90,13 +90,17 @@ def process_purchase(
                 return _purchase_result(conn, done)
 
         card = conn.execute(
-            "SELECT id, account_id, status FROM cards WHERE card_number = ?", (card_number,)
+            """SELECT id, account_id, status, expiry_month, expiry_year
+               FROM cards WHERE card_number = ?""",
+            (card_number,),
         ).fetchone()
         if card is None:
             raise CardNotFound("No card with this number.")
 
         if card["status"] != "active":
             decline_reason = "card_inactive"
+        elif _is_expired(card):
+            decline_reason = "card_expired"
         elif merchant_category not in QUALIFIED:
             decline_reason = "not_qualified"
         else:
@@ -127,6 +131,12 @@ def process_purchase(
         result = _purchase_result(conn, row)
 
     return result
+
+
+def _is_expired(card: sqlite3.Row, today: date | None = None) -> bool:
+    """A card is good through the last day of its expiry month, as a real card is."""
+    today = today or date.today()
+    return (card["expiry_year"], card["expiry_month"]) < (today.year, today.month)
 
 
 def _purchase_result(conn: sqlite3.Connection, row: sqlite3.Row) -> dict:
