@@ -290,7 +290,7 @@ The same three guards work unchanged on Postgres (with row locks instead of a wh
 - Ledger integrity after each case: `balance_cents == Σ deposits − Σ approved purchases`.
 - Each thread opens its own connection and calls `services.process_purchase` directly. No HTTP in the loop, so the test isolates the database guarantee.
 
-**Proof, visible** — the Purchases page has a "Concurrency test" panel: pick a count and an amount, click once, and `app.js` fires them all with `Promise.all(fetch…)`. The activity table fills with the approved/declined mix and the final balance.
+**Proof, visible** — the Make a purchase page has a "Concurrency test" panel: pick a count and an amount, click once, and `app.js` fires them all with `Promise.all(fetch…)`. The activity table fills with the approved/declined mix and the final balance.
 
 ## UI
 
@@ -300,9 +300,9 @@ Logged in, the page is split the way a bank site is. Pages live behind the URL h
 
 | Page | Hash | Shows |
 |---|---|---|
-| Home | `#/` | Balance with a Deposit funds link, the debit card, last 5 activity rows |
+| Home | `#/` | Balance with Make a purchase and Deposit funds buttons, the debit card, last 5 activity rows |
 | Deposit | `#/deposit` | Current balance and the deposit form |
-| Purchases | `#/purchases` | Single purchase and concurrency test |
+| Make a purchase | `#/purchase` | Single purchase and concurrency test. Not in the nav (a nav item called "Purchases" reads like a history list); reached from the Home button |
 | Activity | `#/activity` | Full table: every deposit and purchase attempt, with decline reasons |
 
 - **Card details are hidden by default** (`•••• 1483`, expiry and CVV masked). Show details reveals them; changing page hides them again.

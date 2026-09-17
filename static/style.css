@@ -140,7 +140,9 @@ button {
   color: var(--text);
 }
 .button { display: inline-block; text-decoration: none; font-weight: 600; border-radius: 8px; padding: 0.5rem 0.9rem; }
-.button.primary { background: var(--accent); color: var(--accent-text); }
+.button.primary { background: var(--accent); color: var(--accent-text); border: 1px solid var(--accent); }
+.button.secondary { color: var(--text); border: 1px solid var(--border); }
+.actions { display: flex; flex-wrap: wrap; gap: 0.5rem; justify-content: flex-end; }
 button:disabled { opacity: 0.6; cursor: progress; }
 button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 600; }
 button.ghost { background: transparent; }
@@ -205,6 +207,7 @@ tr.declined td { color: var(--muted); }
 @media (max-width: 560px) {
   .summary { grid-template-columns: 1fr; }
   .balance { text-align: left; justify-items: start; }
+  .actions { justify-content: flex-start; }
   .nav { order: 3; flex-basis: 100%; }
   .session { margin-left: auto; }
   .row { grid-template-columns: 1fr; }

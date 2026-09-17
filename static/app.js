@@ -150,7 +150,7 @@ function actionButton(label, className, handler) {
 const PAGES = {
   home: { label: "Home", render: homePage },
   deposit: { label: "Deposit", render: depositPage },
-  purchases: { label: "Purchases", render: purchasesPage },
+  purchase: { label: "Make a purchase", render: purchasePage, inNav: false }, // reached from Home
   activity: { label: "Activity", render: activityPage },
 };
 
@@ -272,7 +272,7 @@ function renderDashboard(data) {
     h("span", { class: "muted small" }, data.account.email),
     actionButton("Log out", "ghost", logout));
 
-  navBox.replaceChildren(...Object.entries(PAGES).map(([name, { label }]) =>
+  navBox.replaceChildren(...Object.entries(PAGES).filter(([, { inNav }]) => inNav !== false).map(([name, { label }]) =>
     h("a", {
       href: `#/${name === "home" ? "" : name}`,
       class: "nav-link",
@@ -282,7 +282,7 @@ function renderDashboard(data) {
   app.replaceChildren(...PAGES[page].render(data));
 }
 
-function balanceSummary(account, action) {
+function balanceSummary(account, actions) {
   return h("section", { class: "panel summary" },
     h("div", {},
       h("p", { class: "eyebrow" }, "Account holder"),
@@ -290,12 +290,15 @@ function balanceSummary(account, action) {
     h("div", { class: "balance" },
       h("p", { class: "eyebrow" }, "Available balance"),
       h("p", { class: "amount" }, formatCents(account.balance_cents)),
-      action));
+      h("div", { class: "actions" }, actions)));
 }
 
 function homePage({ account, card, activity }) {
   return [
-    balanceSummary(account, h("a", { href: "#/deposit", class: "button primary" }, "Deposit funds")),
+    balanceSummary(account, [
+      h("a", { href: "#/purchase", class: "button secondary" }, "Make a purchase"),
+      h("a", { href: "#/deposit", class: "button primary" }, "Deposit funds"),
+    ]),
     h("div", { class: "grid" },
       cardPanel(account, card),
       h("section", { class: "panel" },
@@ -339,10 +342,10 @@ function activityPage({ activity }) {
   ];
 }
 
-function purchasesPage({ account, card }) {
+function purchasePage({ account, card }) {
   return [
     h("section", { class: "panel intro" },
-      h("h1", {}, "Purchases"),
+      h("h1", {}, "Make a purchase"),
       h("p", { class: "muted" },
         "Purchases are sent by card number, the way a store's card terminal sends them."),
       h("p", {}, "Balance ", h("strong", {}, formatCents(account.balance_cents)),
