@@ -3,8 +3,10 @@
 
 // Money stays in integer cents. Dollars text is parsed without floats.
 export function formatCents(cents) {
-  const whole = Math.floor(cents / 100).toLocaleString("en-US");
-  return `$${whole}.${String(cents % 100).padStart(2, "0")}`;
+  const sign = cents < 0 ? "-" : "";  // nothing negative reaches this today; without it, -50 formats as $-1.-50
+  const abs = Math.abs(cents);
+  const whole = Math.floor(abs / 100).toLocaleString("en-US");
+  return `${sign}$${whole}.${String(abs % 100).padStart(2, "0")}`;
 }
 
 // "25", "$25", "25.5", " 25.50 " -> cents. Anything else -> null.
