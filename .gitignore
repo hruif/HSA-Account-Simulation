@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+.pytest_cache/
+hsa.db
+hsa.db-wal
+hsa.db-shm
+.claude/

@@ -47,15 +47,20 @@ Rules of the connections:
 - `db.py` owns the schema, the connection settings, and a `transaction(conn)` context manager that issues `BEGIN IMMEDIATE` / `COMMIT` / `ROLLBACK`.
 - Each request gets its **own** connection. `sqlite3` connections are not safe to share across threads, FastAPI runs each request in its own thread, and opening a SQLite file takes well under a millisecond.
 
-Connection settings, applied on every open:
+Connection settings, applied on every open (`db.connect`):
 
 ```python
-conn = sqlite3.connect("hsa.db", isolation_level=None, timeout=5.0)  # no hidden BEGIN; we write BEGIN IMMEDIATE ourselves
-conn.execute("PRAGMA journal_mode=WAL")      # readers don't block the writer
-conn.execute("PRAGMA busy_timeout=5000")     # a 2nd writer waits up to 5 s instead of erroring
+conn = sqlite3.connect(
+    "hsa.db",
+    isolation_level=None,     # no hidden BEGIN; we write BEGIN IMMEDIATE ourselves
+    timeout=5.0,              # busy timeout: a 2nd writer waits up to 5 s instead of erroring
+    check_same_thread=False,  # FastAPI may open and close it on different threads; one request uses it one call at a time
+)
 conn.execute("PRAGMA foreign_keys=ON")
 conn.row_factory = sqlite3.Row
 ```
+
+`PRAGMA journal_mode=WAL` is stored in the database file, so `db.init_db` sets it once at startup.
 
 **WAL files.** WAL mode uses three files: `hsa.db` (the data), `hsa.db-wal` (new writes are appended here first), and `hsa.db-shm` (a small index into the WAL). Every ~1000 pages SQLite runs a checkpoint: it copies the WAL pages into `hsa.db` and reuses the WAL from the start. The WAL is a crash-safety buffer, not a history. The permanent history is the `deposits` and `purchases` tables. All three files are git-ignored.
 
@@ -135,12 +140,12 @@ CREATE INDEX idx_purchases_account ON purchases(account_id);
 
 -- one place to read all money activity; nothing to keep in step
 CREATE VIEW account_activity AS
-  SELECT 'D' || id AS ref, account_id, 'deposit' AS type,
+  SELECT id, 'D' || id AS ref, account_id, 'deposit' AS type,
          NULL AS merchant_name, NULL AS merchant_category,
          amount_cents, 'approved' AS status, NULL AS decline_reason, created_at
     FROM deposits
   UNION ALL
-  SELECT 'P' || id, account_id, 'purchase',
+  SELECT id, 'P' || id, account_id, 'purchase',
          merchant_name, merchant_category,
          amount_cents, status, decline_reason, created_at
     FROM purchases;
@@ -156,7 +161,7 @@ Decisions:
 - **`card_number` is unique** because purchases find the account by card number. A duplicate would make the paying account ambiguous. On a random collision, generate again.
 - **One card belongs to one account.** A purchase must debit exactly one account, and real HSAs are individually owned. Family cards (many cards on one account) are a future improvement.
 - **`active` / `replaced`,** not `active` / `inactive`. `replaced` says the card can never come back. A reversible `frozen` state is added only if a freeze feature is built.
-- **`created_at`** exists only where it is shown or used for order: cards, deposits, purchases. It has one-second precision, so concurrent purchases share a time. The view is sorted by `created_at DESC, ref DESC`.
+- **`created_at`** exists only where it is shown or used for order: cards, deposits, purchases. It has one-second precision, so concurrent purchases share a time. The view is sorted by `created_at DESC, id DESC`.
 - **Merchant categories are a Python constant,** not a table. The assignment does not ask for editing them.
 
 ## Auth
@@ -166,7 +171,7 @@ Decisions:
 - **Session:** `secrets.token_urlsafe(32)` goes to the browser in a cookie (`HttpOnly`, `SameSite=Lax`, 7-day expiry). The database stores only its sha256, so a leaked database cannot be used to log in.
 - **Every `/api/me/*` route** depends on `current_account`: read cookie → hash → look up an unexpired session → `account_id`, else 401. Services only ever see that `account_id`, so one user cannot act on another's account.
 - **Log out** deletes the session row and clears the cookie.
-- **CSRF:** `SameSite=Lax` stops other sites sending the cookie on POST, and the API accepts only `application/json` bodies, which a plain HTML form on another site cannot send.
+- **CSRF:** `SameSite=Lax` stops other sites sending the cookie on POST, and a middleware rejects any non-GET request whose `Origin` header names a different host (403).
 - **Demo user:** on startup, if there are no accounts, seed `demo@example.com` / `demo-password` with $100.00 and an active card. The login page shows these credentials.
 
 ## API
