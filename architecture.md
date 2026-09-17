@@ -79,7 +79,8 @@ services.py              signup, deposit, issue_card, process_purchase, get_dash
 models.py                Pydantic request/response models
 categories.py            QUALIFIED / NOT_QUALIFIED merchant category sets
 static/index.html
-static/app.js
+static/app.js            pages, panels, state, everything with a side effect
+static/format.js         pure helpers: parseDollars, formatCents, formatTime, labelFor
 static/style.css
 tests/test_api.py        one happy-path + one failure test per endpoint, plus auth checks
 tests/test_unit.py       Luhn vectors, the error handler, transaction rollback behaviour
@@ -343,7 +344,8 @@ The same three guards work unchanged on Postgres (with row locks instead of a wh
 - **One `CREATE TABLE ... IF NOT EXISTS` script, no migrations.** `init_db()` runs the whole schema on every start, so the reviewer needs no extra tool and the current shape is one readable block that the tests rebuild in a single call. The cost is that it only adds missing tables: change a column and an existing `hsa.db` keeps the old shape until it is deleted. Numbered migration files with an applied-migrations table are what a deployed system needs; here there is no old data anywhere to upgrade: `hsa.db*` is git-ignored and never committed, so a clone has no database at all and the first run builds the current schema. Only a checkout that has already been run needs the file deleted after a schema change.
 - **Order comes from a millisecond timestamp, not from one id sequence.** `deposits` and `purchases` have separate ids, so nothing but `created_at` can put a deposit and a purchase in order. At one-second precision they came back in the wrong order, which is why the default is now `strftime('%Y-%m-%d %H:%M:%f','now')`. Two rows written inside the same millisecond can still tie, and then their order is arbitrary again: measured at about 33 writes per millisecond when a script drives the service layer flat out, and never in a browser, where a round trip is far longer. The effect is confined to how two rows are listed — balances and approvals are decided by the `UPDATE`, not by this sort — so it did not justify the fix that removes it, which is one `ledger` table with a single id sequence. That is the change to make if this grows.
 - **`PRAGMA synchronous = NORMAL` with WAL.** Every committed transaction stays consistent and the database cannot be corrupted, but the WAL is not fsynced on each commit, so a host crash or power cut can lose the last few commits. For a local simulation that trade buys a large write speed-up; a real ledger would use `FULL`.
-- **Frontend logic is checked by hand, not by tests.** `parseDollars`, `formatCents` and `formatTime` are pure and worth unit tests, but adding a JavaScript test runner to a Python take-home costs more than it returns here. Everything they feed is validated again on the server, which is tested.
+- **Frontend logic is checked by hand, not by tests.** The four pure helpers live in `static/format.js` as an ES module, so a test runner can import them the day one is wanted; `app.js` keeps everything that touches state, the DOM or the network. Adding a JavaScript runner to a Python take-home for four functions costs more than it returns, and everything they feed is validated again on the server, which is tested.
+- **Native ES modules, no bundler.** `index.html` loads `app.js` with `type="module"`, so the split above needs no build step, no `node_modules` and no source maps. The same mechanism is what would split `app.js` further, one file per page, if the app grew.
 
 ### Out of scope
 

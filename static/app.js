@@ -1,6 +1,7 @@
-"use strict";
-
 // The browser only calls /api/* and redraws. The session cookie says who is logged in.
+// This file holds everything with state or a side effect; format.js holds the pure helpers.
+
+import { formatCents, formatTime, labelFor, parseDollars } from "./format.js";
 
 const DEMO = { email: "demo@example.com", password: "demo-password" }; // seeded in main.py
 const DECLINE_LABELS = {
@@ -59,18 +60,7 @@ function errorMessage(data, status) {
   return `Request failed (${status})`;
 }
 
-// Money stays in integer cents. Dollars text is parsed without floats.
-function formatCents(cents) {
-  const whole = Math.floor(cents / 100).toLocaleString("en-US");
-  return `$${whole}.${String(cents % 100).padStart(2, "0")}`;
-}
-
-function parseDollars(text) {
-  const match = /^\s*\$?(\d{1,7})(?:\.(\d{1,2}))?\s*$/.exec(text);
-  if (!match) return null;
-  return Number(match[1]) * 100 + Number((match[2] || "").padEnd(2, "0"));
-}
-
+// Not pure: the cap comes from the server, so this one stays here.
 function requireDollars(text) {
   const cents = parseDollars(text);
   if (cents === null || cents <= 0) throw new Error(`"${text}" is not an amount like 25 or 25.50`);
@@ -78,15 +68,6 @@ function requireDollars(text) {
     throw new Error(`The most you can send in one request is ${formatCents(maxAmountCents)}.`);
   }
   return cents;
-}
-
-function formatTime(sqliteUtc) {
-  return new Date(sqliteUtc.replace(" ", "T") + "Z").toLocaleString();
-}
-
-function labelFor(category) {
-  const words = category.replace(/_/g, " ");
-  return words[0].toUpperCase() + words.slice(1);
 }
 
 let toastTimer;

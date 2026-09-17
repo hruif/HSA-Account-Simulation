@@ -1,4 +1,4 @@
-"""HTTP layer: validate input, resolve the connection and logged-in account, call one service."""
+"""The HTTP interface. It validates the request, resolves who is logged in, and calls the matching service."""
 import sqlite3
 from contextlib import asynccontextmanager
 from pathlib import Path
