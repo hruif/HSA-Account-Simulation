@@ -27,9 +27,13 @@ Open http://localhost:8000. The database file `hsa.db` is created on first start
 - Password: `demo-password`
 - Balance $100.00 and an active card
 
-Delete `hsa.db*` to start fresh. There is no migration code: the schema is created with
-`CREATE TABLE IF NOT EXISTS`, so an `hsa.db` made by an older version keeps its old columns.
-**After pulling a schema change, delete `hsa.db`, `hsa.db-wal` and `hsa.db-shm`.**
+`hsa.db`, `hsa.db-wal` and `hsa.db-shm` are git-ignored, so a fresh clone has no database and
+the first run builds the current one. Nothing to clean up.
+
+Delete those three files to start from an empty account list. Do the same if you ran an older
+version in this folder and then pulled a schema change: there is no migration code, so an
+existing `hsa.db` keeps its old columns.
+
 API docs are at http://localhost:8000/docs.
 
 ## Test
