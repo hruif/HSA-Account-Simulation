@@ -339,6 +339,7 @@ The same three guards work unchanged on Postgres (with row locks instead of a wh
 - **Card data in plain text.** Simulation only.
 - **Categories in code.** Real systems use merchant category codes (MCC) from the card network.
 - **Deposits have no limit.** IRS annual contribution limits are a rule layer to add later.
+- **One `CREATE TABLE ... IF NOT EXISTS` script, no migrations.** `init_db()` runs the whole schema on every start, so the reviewer needs no extra tool and the current shape is one readable block that the tests rebuild in a single call. The cost is that it only adds missing tables: change a column and an existing `hsa.db` keeps the old shape until it is deleted. Numbered migration files with an applied-migrations table are what a deployed system needs; here there is no old data anywhere to upgrade.
 - **`PRAGMA synchronous = NORMAL` with WAL.** Every committed transaction stays consistent and the database cannot be corrupted, but the WAL is not fsynced on each commit, so a host crash or power cut can lose the last few commits. For a local simulation that trade buys a large write speed-up; a real ledger would use `FULL`.
 - **Frontend logic is checked by hand, not by tests.** `parseDollars`, `formatCents` and `formatTime` are pure and worth unit tests, but adding a JavaScript test runner to a Python take-home costs more than it returns here. Everything they feed is validated again on the server, which is tested.
 
