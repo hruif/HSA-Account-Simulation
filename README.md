@@ -39,10 +39,11 @@ pytest
 ## Try the core flows
 
 1. **Create an account:** Sign up tab, or log in with the demo account.
-2. **Deposit:** enter an amount in Deposit funds.
-3. **Issue a card:** Issue card (or Replace card, which makes the old number stop working).
-4. **Purchase:** pick a category. Pharmacy, hospital, doctor, dental, vision, medical equipment, and lab are approved; restaurant, grocery, electronics, and the rest are declined.
-5. **Concurrency:** with a $100 balance, click **$80 + $50** then **Send all at once**. One is approved, one is declined, and $20 is left.
+2. **Deposit:** the **Deposit** page.
+3. **Issue a card:** **Home** → Issue card. The number is hidden until you click Show details. Replace card makes the old number stop working.
+4. **Purchase:** **Simulate purchases** → Single purchase. It charges your active card, the way a store terminal would. Pharmacy, hospital, doctor, dental, vision, medical equipment, and lab are approved; restaurant, grocery, electronics, and the rest are declined. "Use a different card number" lets you try an old, replaced card.
+5. **Concurrency:** **Simulate purchases** → Concurrency test. With a $100 balance, click **$80 + $50** then **Send all at once**. One is approved, one is declined, and $20 is left.
+6. **History:** **Activity** lists every deposit and purchase attempt, including declines and why.
 
 ## Layout
 

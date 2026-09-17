@@ -294,28 +294,22 @@ The same three guards work unchanged on Postgres (with row locks instead of a wh
 
 ## UI
 
-Logged out: one card with Log in / Sign up tabs, and the demo credentials under it.
+Logged out: one panel with Log in / Sign up tabs, and the demo credentials under it.
 
-Logged in:
+Logged in, the page is split the way a bank site is. Pages live behind the URL hash, so Back, Forward, and reload keep your place:
 
-```
-┌───────────────────────────────────────────────────────────────────────────┐
-│ Jane Doe · jane@example.com                  Balance $100.00   [Log out]  │
-├───────────────────────────────────────────────────────────────────────────┤
-│ Deposit   [ amount ] [Deposit]                                            │
-│                                                                           │
-│ Card      4xxx xxxx xxxx 1234  exp 09/29  CVV 123    [Replace card]       │
-│           (or [Issue card] if none)                                       │
-│                                                                           │
-│ Purchase  [merchant] [category ▾] [amount] [Submit]   (uses your card)    │
-│ Concurrency demo  [10] × [$30] [Fire all]                                 │
-│                                                                           │
-│ Activity                                                                  │
-│  ref  time  type  merchant  category  amount  status  reason              │
-└───────────────────────────────────────────────────────────────────────────┘
-```
+| Page | Hash | Shows |
+|---|---|---|
+| Home | `#/` | Balance with a Deposit funds link, the debit card, last 5 activity rows |
+| Deposit | `#/deposit` | Current balance and the deposit form |
+| Activity | `#/activity` | Full table: every deposit and purchase attempt, with decline reasons |
+| Simulate purchases | `#/simulate` | Reviewer tools, set apart in the nav: single purchase and concurrency test |
 
-Every action re-fetches `GET /api/me` and redraws from the response. No client-side state; the cookie is the only thing that says who you are.
+- **Card details are hidden by default** (`•••• 1483`, expiry and CVV masked). Show details reveals them; changing page hides them again.
+- **Purchases are on a separate "Simulate" page** because on a real card they come from a store's terminal, not from the bank's site. The single-purchase form charges the active card automatically; "Use a different card number" opens a field for testing a replaced card.
+- **Concurrency test** sends every listed amount as a pharmacy purchase with `Promise.all`, so the requests really overlap, and shows how many were approved and the balance left. Presets: $80 + $50, 10 × $30, 20 × $5.
+
+Every action re-fetches `GET /api/me` and redraws from the response. The cookie is the only thing that says who you are.
 
 ## Run
 

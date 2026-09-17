@@ -11,8 +11,11 @@ const DECLINE_LABELS = {
 
 const app = document.getElementById("app");
 const sessionBox = document.getElementById("session");
+const navBox = document.getElementById("nav");
 let categories = { qualified: [], not_qualified: [] };
-let lastBurst = null; // result of the last concurrency demo, kept across redraws
+let lastData = null; // last GET /api/me response, for redraws that need no new data
+let cardRevealed = false; // card details are hidden until the owner asks
+let lastBurst = null; // result of the last concurrency test, kept across redraws
 
 // ---------- helpers ----------
 
@@ -143,12 +146,29 @@ function actionButton(label, className, handler) {
 
 // ---------- flow ----------
 
+// Pages live behind the URL hash (#/deposit, ...), so Back/Forward and reload keep your place.
+const PAGES = {
+  home: { label: "Home", render: homePage },
+  deposit: { label: "Deposit", render: depositPage },
+  activity: { label: "Activity", render: activityPage },
+  simulate: { label: "Simulate purchases", render: simulatePage, tool: true },
+};
+
+function currentPage() {
+  const name = location.hash.replace(/^#\/?/, "");
+  return PAGES[name] ? name : "home";
+}
+
 async function boot() {
   try {
     categories = await api("/api/categories");
   } catch (error) {
     toast(error.message, "error");
   }
+  window.addEventListener("hashchange", () => {
+    cardRevealed = false;
+    refresh();
+  });
   await refresh();
 }
 
@@ -164,12 +184,15 @@ async function refresh() {
 async function logout() {
   await api("/api/logout", { method: "POST" });
   lastBurst = null;
+  cardRevealed = false;
+  history.replaceState(null, "", location.pathname);
   renderAuth("login");
 }
 
 async function issueCard() {
   const card = await api("/api/me/card", { method: "POST" });
   toast(`Card ending ${card.card_number.slice(-4)} is now active`, "ok");
+  cardRevealed = false;
   await refresh();
 }
 
@@ -187,10 +210,11 @@ function describePurchase(p) {
   return p.status === "approved" ? `Approved: ${what}` : `Declined (${DECLINE_LABELS[p.decline_reason]}): ${what}`;
 }
 
-// ---------- views ----------
+// ---------- logged out ----------
 
 function renderAuth(mode) {
   sessionBox.replaceChildren();
+  navBox.replaceChildren();
   const isLogin = mode === "login";
 
   const form = h("form", {
@@ -222,15 +246,11 @@ function renderAuth(mode) {
     class: "link",
     onclick: () => {
       if (!isLogin) renderAuth("login");
-      fillDemo();
+      const loginForm = app.querySelector("form");
+      loginForm.email.value = DEMO.email;
+      loginForm.password.value = DEMO.password;
     },
   }, "Fill in demo account");
-
-  function fillDemo() {
-    const loginForm = app.querySelector("form");
-    loginForm.email.value = DEMO.email;
-    loginForm.password.value = DEMO.password;
-  }
 
   app.replaceChildren(h("section", { class: "panel auth" },
     h("h1", {}, "Health Savings Account"),
@@ -242,39 +262,98 @@ function renderAuth(mode) {
       "Demo: ", h("code", {}, DEMO.email), " / ", h("code", {}, DEMO.password), " · ", useDemo)));
 }
 
-function renderDashboard({ account, card, activity }) {
+// ---------- logged in ----------
+
+function renderDashboard(data) {
+  lastData = data;
+  const page = currentPage();
+
   sessionBox.replaceChildren(
-    h("span", { class: "muted small" }, account.email),
+    h("span", { class: "muted small" }, data.account.email),
     actionButton("Log out", "ghost", logout));
 
-  app.replaceChildren(
-    h("section", { class: "panel summary" },
-      h("div", {},
-        h("p", { class: "eyebrow" }, "Account holder"),
-        h("h1", {}, account.owner_name)),
-      h("div", { class: "balance" },
-        h("p", { class: "eyebrow" }, "Available balance"),
-        h("p", { class: "amount" }, formatCents(account.balance_cents)))),
-    h("div", { class: "grid" }, depositPanel(), cardPanel(account, card)),
-    h("div", { class: "grid" }, purchasePanel(card), concurrencyPanel(card)),
-    activityPanel(activity));
+  navBox.replaceChildren(...Object.entries(PAGES).map(([name, { label, tool }]) =>
+    h("a", {
+      href: `#/${name === "home" ? "" : name}`,
+      class: tool ? "nav-link tool" : "nav-link",
+      "aria-current": name === page ? "page" : null,
+    }, label)));
+
+  app.replaceChildren(...PAGES[page].render(data));
 }
 
-function depositPanel() {
-  return h("section", { class: "panel" },
-    h("h2", {}, "Deposit funds"),
-    h("form", {
-      class: "stack",
-      onsubmit: onSubmit(async (data) => {
-        const cents = requireDollars(data.get("amount"));
-        await api("/api/me/deposits", { method: "POST", body: { amount_cents: cents } });
-        toast(`Deposited ${formatCents(cents)}`, "ok");
-        await refresh();
-      }),
-    },
-      field("Amount", moneyInput("amount", "100.00")),
-      h("button", { type: "submit", class: "primary" }, "Deposit")));
+function balanceSummary(account, action) {
+  return h("section", { class: "panel summary" },
+    h("div", {},
+      h("p", { class: "eyebrow" }, "Account holder"),
+      h("h1", {}, account.owner_name)),
+    h("div", { class: "balance" },
+      h("p", { class: "eyebrow" }, "Available balance"),
+      h("p", { class: "amount" }, formatCents(account.balance_cents)),
+      action));
 }
+
+function homePage({ account, card, activity }) {
+  return [
+    balanceSummary(account, h("a", { href: "#/deposit", class: "button primary" }, "Deposit funds")),
+    h("div", { class: "grid" },
+      cardPanel(account, card),
+      h("section", { class: "panel" },
+        h("div", { class: "panel-head" },
+          h("h2", {}, "Recent activity"),
+          activity.length > 5 && h("a", { href: "#/activity", class: "small" }, "View all")),
+        activityTable(activity.slice(0, 5), { compact: true }))),
+  ];
+}
+
+function depositPage({ account }) {
+  const form = h("form", {
+    class: "stack",
+    onsubmit: onSubmit(async (data) => {
+      const cents = requireDollars(data.get("amount"));
+      await api("/api/me/deposits", { method: "POST", body: { amount_cents: cents } });
+      toast(`Deposited ${formatCents(cents)}`, "ok");
+      await refresh();
+    }),
+  },
+    field("Amount", moneyInput("amount", "100.00")),
+    h("div", { class: "row wrap" },
+      ["50", "100", "500"].map((value) =>
+        h("button", { type: "button", class: "chip", onclick: () => (form.amount.value = `${value}.00`) }, `$${value}`))),
+    h("button", { type: "submit", class: "primary" }, "Deposit"));
+
+  return [
+    h("section", { class: "panel narrow" },
+      h("h1", {}, "Deposit funds"),
+      h("p", { class: "muted" }, "Current balance ", h("strong", {}, formatCents(account.balance_cents))),
+      form),
+  ];
+}
+
+function activityPage({ activity }) {
+  return [
+    h("section", { class: "panel" },
+      h("h1", {}, "Activity"),
+      h("p", { class: "muted small" }, "Every deposit and every purchase attempt, newest first (last 50)."),
+      activityTable(activity)),
+  ];
+}
+
+function simulatePage({ account, card }) {
+  return [
+    h("section", { class: "panel intro" },
+      h("p", { class: "eyebrow" }, "Reviewer tools"),
+      h("h1", {}, "Simulate purchases"),
+      h("p", { class: "muted" },
+        "On a real card, purchases come from a store's card terminal, not from this site. ",
+        "This page plays that terminal: it sends your card number to the purchase API."),
+      h("p", {}, "Balance ", h("strong", {}, formatCents(account.balance_cents)),
+        card ? ` · card ending ${card.card_number.slice(-4)}` : " · no active card")),
+    h("div", { class: "grid" }, purchasePanel(card), concurrencyPanel(card)),
+  ];
+}
+
+// ---------- panels ----------
 
 function cardPanel(account, card) {
   if (!card) {
@@ -283,41 +362,70 @@ function cardPanel(account, card) {
       h("p", { class: "muted" }, "No card yet. Purchases need an active card."),
       actionButton("Issue card", "primary", issueCard));
   }
+
+  const last4 = card.card_number.slice(-4);
   const expiry = `${String(card.expiry_month).padStart(2, "0")}/${String(card.expiry_year).slice(-2)}`;
+  const number = cardRevealed ? card.card_number.replace(/(\d{4})(?=\d)/g, "$1 ") : `•••• •••• •••• ${last4}`;
+
   return h("section", { class: "panel" },
     h("h2", {}, "Debit card"),
     h("div", { class: "card-visual" },
       h("span", { class: "card-brand" }, "HSA · Virtual debit"),
-      h("span", { class: "card-number" }, card.card_number.replace(/(\d{4})(?=\d)/g, "$1 ")),
+      h("span", { class: "card-number" }, number),
       h("div", { class: "card-meta" },
         h("span", {}, account.owner_name.toUpperCase()),
-        h("span", {}, `EXP ${expiry}`),
-        h("span", {}, `CVV ${card.cvv}`))),
-    actionButton("Replace card", "ghost", async () => {
-      if (!confirm("Replace this card? The current number will stop working.")) return;
-      await issueCard();
-    }));
+        h("span", {}, `EXP ${cardRevealed ? expiry : "••/••"}`),
+        h("span", {}, `CVV ${cardRevealed ? card.cvv : "•••"}`))),
+    h("div", { class: "row" },
+      h("button", {
+        type: "button",
+        class: "ghost",
+        "aria-pressed": String(cardRevealed),
+        onclick: () => {
+          cardRevealed = !cardRevealed;
+          renderDashboard(lastData);
+        },
+      }, cardRevealed ? "Hide details" : "Show details"),
+      actionButton("Replace card", "ghost", async () => {
+        if (!confirm("Replace this card? The current number will stop working.")) return;
+        await issueCard();
+      })));
 }
 
 function purchasePanel(card) {
+  const otherCard = h("input", { name: "card_number", inputmode: "numeric", autocomplete: "off",
+    placeholder: "16-digit card number" });
+  const otherCardField = field("Card number", otherCard);
+  otherCardField.hidden = true;
+
+  const toggle = h("button", {
+    type: "button",
+    class: "link small",
+    onclick: () => {
+      otherCardField.hidden = !otherCardField.hidden;
+      toggle.textContent = otherCardField.hidden ? "Use a different card number" : "Use my active card";
+      if (!otherCardField.hidden) otherCard.focus();
+    },
+  }, "Use a different card number");
+
   return h("section", { class: "panel" },
-    h("h2", {}, "Make a purchase"),
+    h("h2", {}, "Single purchase"),
     h("p", { class: "muted small" },
-      "Sent by card number, the way a merchant would. Paste an old card number to see it declined."),
+      card ? `Charged to your card ending ${card.card_number.slice(-4)}. ` : "You have no active card. ",
+      "To see a replaced card declined, ", toggle, "."),
     h("form", {
       class: "stack",
       onsubmit: onSubmit(async (data) => {
-        const body = purchaseBody(data.get("card_number"), data.get("merchant_name"),
+        const cardNumber = otherCardField.hidden ? card?.card_number : data.get("card_number");
+        if (!cardNumber) throw new Error("Issue a card first, or enter a card number.");
+        const body = purchaseBody(cardNumber, data.get("merchant_name"),
           data.get("merchant_category"), requireDollars(data.get("amount")));
         const result = await api("/api/purchases", { method: "POST", body });
         toast(describePurchase(result.purchase), result.status === "approved" ? "ok" : "warn");
         await refresh();
       }),
     },
-      field("Card number", h("input", {
-        name: "card_number", value: card ? card.card_number : "", required: true, inputmode: "numeric",
-        autocomplete: "off",
-      })),
+      otherCardField,
       field("Merchant", h("input", { name: "merchant_name", value: "CVS Pharmacy", required: true })),
       h("div", { class: "row" },
         field("Category", categorySelect("merchant_category", "pharmacy")),
@@ -354,7 +462,7 @@ function concurrencyPanel(card) {
       await refresh();
     }),
   },
-    field("Amounts sent at the same time", h("input", { name: "amounts", value: "80, 50", required: true })),
+    field("Amounts to send at the same moment", h("input", { name: "amounts", value: "80, 50", required: true })),
     h("div", { class: "row wrap" },
       presetButton("$80 + $50", "80, 50"),
       presetButton("10 × $30", Array(10).fill("30").join(", ")),
@@ -366,9 +474,11 @@ function concurrencyPanel(card) {
   }
 
   return h("section", { class: "panel" },
-    h("h2", {}, "Concurrent purchases"),
+    h("h2", {}, "Concurrency test"),
     h("p", { class: "muted small" },
-      "Fires every amount as a pharmacy purchase in parallel. The balance must never go below $0."),
+      "The assignment requires that purchases arriving at the same time never overdraw the account. ",
+      "Example: balance $100, purchases of $80 and $50 at once, so only one can be approved. ",
+      "Clicking Submit twice is too slow to overlap, so this sends every amount as a pharmacy purchase in parallel."),
     form,
     lastBurst && h("div", { class: "burst" },
       h("p", {}, `Sent ${lastBurst.sent} at once: `,
@@ -379,27 +489,35 @@ function concurrencyPanel(card) {
         `${formatCents(lastBurst.endCents)} left.`)));
 }
 
-function activityPanel(activity) {
-  const body = activity.length
-    ? h("div", { class: "table-wrap" },
-      h("table", {},
-        h("thead", {}, h("tr", {},
-          ["Ref", "Time", "Type", "Merchant", "Category", "Amount", "Result"].map((c) => h("th", { scope: "col" }, c)))),
-        h("tbody", {}, activity.map(activityRow))))
-    : h("p", { class: "muted" }, "No activity yet.");
-
-  return h("section", { class: "panel" },
-    h("h2", {}, "Activity"),
-    h("p", { class: "muted small" }, "Every deposit and every purchase attempt, newest first (last 50)."),
-    body);
+function activityTable(activity, { compact = false } = {}) {
+  if (!activity.length) return h("p", { class: "muted" }, "No activity yet.");
+  const columns = compact
+    ? ["Time", "Description", "Amount", "Result"]
+    : ["Ref", "Time", "Type", "Merchant", "Category", "Amount", "Result"];
+  return h("div", { class: "table-wrap" },
+    h("table", {},
+      h("thead", {}, h("tr", {}, columns.map((c) => h("th", { scope: "col" }, c)))),
+      h("tbody", {}, activity.map((row) => activityRow(row, compact)))));
 }
 
-function activityRow(row) {
+function activityRow(row, compact) {
   const isDeposit = row.type === "deposit";
   const approved = row.status === "approved";
   const sign = isDeposit ? "+" : approved ? "−" : "";
   const qualified = row.merchant_category && categories.qualified.includes(row.merchant_category);
+  const amount = h("td", { class: "mono right nowrap" }, `${sign}${formatCents(row.amount_cents)}`);
+  const result = h("td", {}, approved
+    ? h("span", { class: "tag ok" }, "Approved")
+    : h("span", { class: "tag warn", title: DECLINE_LABELS[row.decline_reason] },
+      compact ? "Declined" : `Declined · ${DECLINE_LABELS[row.decline_reason]}`));
 
+  if (compact) {
+    return h("tr", { class: approved ? "" : "declined" },
+      h("td", { class: "nowrap" }, formatTime(row.created_at)),
+      h("td", {}, isDeposit ? "Deposit" : row.merchant_name),
+      amount,
+      result);
+  }
   return h("tr", { class: approved ? "" : "declined" },
     h("td", { class: "mono" }, row.ref),
     h("td", { class: "nowrap" }, formatTime(row.created_at)),
@@ -408,10 +526,8 @@ function activityRow(row) {
     h("td", {}, row.merchant_category
       ? h("span", { class: qualified ? "tag ok" : "tag muted-tag" }, labelFor(row.merchant_category))
       : "—"),
-    h("td", { class: "mono right nowrap" }, `${sign}${formatCents(row.amount_cents)}`),
-    h("td", {}, approved
-      ? h("span", { class: "tag ok" }, "Approved")
-      : h("span", { class: "tag warn", title: row.decline_reason }, `Declined · ${DECLINE_LABELS[row.decline_reason]}`)));
+    amount,
+    result);
 }
 
 boot();
