@@ -279,7 +279,8 @@ function renderDashboard(data) {
       "aria-current": name === page ? "page" : null,
     }, label)));
 
-  app.replaceChildren(...PAGES[page].render(data));
+  const backLink = page === "home" ? [] : [h("a", { href: "#/", class: "back-link" }, "← Back to home")];
+  app.replaceChildren(...backLink, ...PAGES[page].render(data));
 }
 
 function balanceSummary(account, actions) {

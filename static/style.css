@@ -95,6 +95,8 @@ main {
 .narrow { max-width: 480px; width: 100%; }
 .panel-head { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; }
 a { color: var(--accent); }
+.back-link { justify-self: start; font-size: 0.9rem; text-decoration: none; }
+.back-link:hover { text-decoration: underline; }
 
 .summary { grid-template-columns: 1fr auto; align-items: end; }
 .eyebrow { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
