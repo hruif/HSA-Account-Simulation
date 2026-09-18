@@ -66,3 +66,7 @@ categories.py   qualified / not-qualified merchant categories
 static/         index.html, app.js, style.css
 tests/          API and concurrency tests
 ```
+
+## Demo video
+
+[Watch the 4-minute demo](https://youtu.be/mnz5mVrgLGQ) — the app, architecture, data model, transaction processing, what I'd improve, and how AI was used and validated.
