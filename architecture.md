@@ -76,7 +76,7 @@ main.py                  FastAPI app, routes, static mount, schema + demo seed o
 db.py                    connect(), schema SQL, transaction() context manager
 auth.py                  hash/verify password, create/lookup/delete session, current_account dependency
 services.py              signup, deposit, issue_card, process_purchase, get_dashboard
-models.py                Pydantic request/response models
+models.py                Pydantic models for request bodies; responses are plain dicts
 categories.py            QUALIFIED / NOT_QUALIFIED merchant category sets
 static/index.html
 static/app.js            pages, panels, state, everything with a side effect
